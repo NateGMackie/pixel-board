@@ -1,0 +1,2190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LED Matrix Message Board</title>
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0c0d0f;
+      --surface-1: #121417;
+      --surface-2: #171a1f;
+      --surface-3: #1d2127;
+      --surface-hover: #232831;
+      --border: rgba(255,255,255,.09);
+      --border-strong: rgba(255,255,255,.16);
+      --text: #f4f6f8;
+      --text-secondary: #b8c0ca;
+      --text-tertiary: #7f8995;
+      /* Semantic status color: stays green for connected/success. */
+      --status-success: 0, 255, 140;
+
+      /* Content accent: updated from the message color picker. */
+      --content-accent: 0, 255, 140;
+      --content-accent-solid: rgb(var(--content-accent));
+      --content-accent-soft: rgba(var(--content-accent), .14);
+      --content-accent-border: rgba(var(--content-accent), .44);
+      --content-accent-focus: rgba(var(--content-accent), .48);
+      --content-accent-ink: #07150f;
+
+      --danger: 244,63,94;
+      --focus: var(--content-accent-focus);
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 18px;
+      --shadow-card: 0 1px 1px rgba(0,0,0,.24), 0 8px 24px rgba(0,0,0,.22);
+      --shadow-float: 0 18px 48px rgba(0,0,0,.36);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { background: var(--bg); }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 24px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(900px 500px at 50% -10%, rgba(var(--content-accent),.055), transparent 62%),
+        var(--bg);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    .wrap {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    header {
+      min-height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 2px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .connection-dot {
+      width: 9px;
+      height: 9px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--text-tertiary);
+      box-shadow: 0 0 0 4px rgba(127,137,149,.10);
+      transition: background .18s ease, box-shadow .18s ease;
+    }
+
+    .connection-dot.connected {
+      background: rgb(var(--status-success));
+      box-shadow:
+        0 0 0 4px rgba(var(--status-success), .14),
+        0 0 14px rgba(var(--status-success), .22);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 28px;
+      font-weight: 650;
+      letter-spacing: -.02em;
+      color: var(--text);
+    }
+
+    .header-tools {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .bezel {
+      min-width: 160px;
+      padding-left: 12px;
+      border-left: 1px solid var(--border);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .bezel .lbl {
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+    }
+
+    .bezel .val {
+      margin-top: 3px;
+      font-size: 13px;
+      font-weight: 650;
+      color: var(--content-accent-solid);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    #controlsWrap {
+      overflow: hidden;
+      max-height: 2200px;
+      opacity: 1;
+      transition: max-height .24s ease, opacity .18s ease, transform .18s ease;
+    }
+
+    #controlsWrap.collapsed {
+      max-height: 0;
+      opacity: 0;
+      transform: translateY(-4px);
+      pointer-events: none;
+    }
+
+    .card {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      background: var(--surface-1);
+      box-shadow: var(--shadow-card);
+    }
+
+    #displayCard {
+      overflow: hidden;
+      padding: 14px;
+      border-color: rgba(var(--content-accent), .18);
+      box-shadow: var(--shadow-float);
+      transition: border-color .18s ease;
+    }
+
+    #controlsCard { padding: 16px; }
+
+    .display-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+      padding: 0 2px;
+      font-size: 12px;
+      line-height: 16px;
+      color: var(--text-tertiary);
+    }
+
+    .btnrow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    button,
+    input,
+    select { font: inherit; }
+
+    button {
+      appearance: none;
+      min-height: 38px;
+      padding: 8px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      color: var(--text);
+      background: var(--surface-2);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 18px;
+      transition: background .14s ease, border-color .14s ease, transform .08s ease, box-shadow .14s ease;
+    }
+
+    button:hover { background: var(--surface-hover); }
+    button:active { transform: translateY(1px); }
+
+    button.primary {
+      border-color: var(--content-accent-border);
+      color: var(--content-accent-ink);
+      background: var(--content-accent-solid);
+      box-shadow: 0 0 0 1px rgba(var(--content-accent), .05) inset;
+    }
+
+    button.primary:hover {
+      background: var(--content-accent-solid);
+      border-color: var(--content-accent-solid);
+      filter: brightness(1.08);
+    }
+
+    button:disabled {
+      opacity: .42;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    canvas:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 3px var(--focus);
+    }
+
+    .canvas-frame {
+      position: relative;
+      padding: 24px;
+      border: 1px solid rgba(255,255,255,.055);
+      border-radius: 16px;
+      background-image:
+        radial-gradient(circle at 14px 14px, #4a4f58 0 2px, transparent 3px),
+        radial-gradient(circle at calc(100% - 14px) 14px, #4a4f58 0 2px, transparent 3px),
+        radial-gradient(circle at 14px calc(100% - 14px), #4a4f58 0 2px, transparent 3px),
+        radial-gradient(circle at calc(100% - 14px) calc(100% - 14px), #4a4f58 0 2px, transparent 3px),
+        linear-gradient(150deg, #1b1f24, #0e1013);
+      box-shadow: inset 0 2px 6px rgba(0,0,0,.5);
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-width: 100%;
+      margin: 0 auto;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 12px;
+      background: #080a0d;
+      image-rendering: pixelated;
+      touch-action: none;
+    }
+
+    .controls {
+      display: grid;
+      gap: 0;
+    }
+
+    .control-section {
+      padding: 16px 0;
+      border-top: 1px solid rgba(255,255,255,.055);
+    }
+
+    .control-section:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .section-title {
+      margin-bottom: 12px;
+      font-size: 10px;
+      line-height: 14px;
+      font-weight: 750;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+    }
+
+    .field + .field { margin-top: 12px; }
+
+    details.control-section { padding-bottom: 0; }
+
+    details.control-section summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      list-style: none;
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 650;
+      user-select: none;
+    }
+
+    details.control-section summary::-webkit-details-marker { display: none; }
+    details.control-section summary::after {
+      content: "⌄";
+      color: var(--text-tertiary);
+      transition: transform .16s ease;
+    }
+    details.control-section[open] summary::after { transform: rotate(180deg); }
+    .advanced-content { padding-top: 14px; padding-bottom: 16px; }
+
+    label {
+      display: block;
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+
+    input[type="text"],
+    input[type="number"],
+    select {
+      width: 100%;
+      min-height: 40px;
+      margin-top: 6px;
+      padding: 9px 11px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      outline: none;
+      color: var(--text);
+      background: var(--surface-2);
+      transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
+    }
+
+    input[type="text"]:hover,
+    input[type="number"]:hover,
+    select:hover { background: var(--surface-3); }
+
+    input[type="text"]:focus,
+    input[type="number"]:focus,
+    select:focus { border-color: rgba(var(--content-accent),.58); }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--content-accent-solid);
+      margin-top: 10px;
+      accent-color: var(--content-accent-solid);
+    }
+
+    input[type="color"] {
+      width: 100%;
+      height: 42px;
+      margin-top: 6px;
+      padding: 4px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      background: var(--surface-2);
+      cursor: pointer;
+    }
+
+    .help,
+    .mini {
+      margin-top: 6px;
+      font-size: 11px;
+      line-height: 16px;
+      color: var(--text-tertiary);
+    }
+
+    .two {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .three {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .brushrow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+
+    .brush {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tag.on {
+      border-color: var(--content-accent-border);
+      background: var(--content-accent-soft);
+      color: var(--content-accent-solid);
+    }
+
+    .tag.off {
+      border-color: rgba(var(--danger),.45);
+      background: rgba(var(--danger),.10);
+    }
+
+    .status {
+      min-height: 18px;
+      font-size: 12px;
+      line-height: 18px;
+      color: var(--text-secondary);
+    }
+
+    body.fullscreen { padding: 0; }
+
+    body.fullscreen header,
+    body.fullscreen #controlsCard { display: none; }
+
+    body.fullscreen #displayCard {
+      min-height: 100vh;
+      padding: 12px;
+      border: 0;
+      border-radius: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      background: #070809;
+      box-shadow: none;
+    }
+
+    @media (min-width: 980px) {
+      .grid {
+        grid-template-columns: minmax(0, 1.55fr) minmax(320px, .75fr);
+        gap: 16px;
+      }
+
+      #controlsWrap {
+        position: sticky;
+        top: 16px;
+        max-height: calc(100vh - 32px);
+        overflow: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255,255,255,.16) transparent;
+      }
+
+      #controlsWrap.collapsed {
+        max-height: 0;
+        overflow: hidden;
+      }
+    }
+
+    @media (max-width: 700px) {
+      body { padding: 12px; }
+
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 4px 2px;
+      }
+
+      .header-tools {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .bezel {
+        min-width: 0;
+        padding-left: 0;
+        border-left: 0;
+        text-align: right;
+      }
+
+      .two,
+      .three { grid-template-columns: 1fr; }
+
+      #displayCard,
+      #controlsCard { padding: 12px; }
+
+      button { min-height: 42px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <span class="connection-dot" id="connectionDot" aria-hidden="true"></span>
+        <div>
+          <h1>Pixel Board</h1>
+          <div class="mini" style="margin-top:2px">LED matrix controller</div>
+        </div>
+      </div>
+
+      <div class="header-tools">
+        <button id="toggleControlsBtn" type="button">Hide controls</button>
+
+        <div class="bezel">
+          <div class="lbl">Mode</div>
+          <div class="val" id="bezelLabel">SCROLL LEFT</div>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card" id="displayCard">
+        <div class="display-meta">
+          <span id="resolutionLabel">64 × 16 logical pixels</span>
+          <span id="pointerLabel">x: —, y: —</span>
+        </div>
+
+        <div class="canvas-frame">
+          <canvas id="canvas" aria-label="LED matrix preview" tabindex="0"></canvas>
+        </div>
+
+      </section>
+
+      <div id="controlsWrap">
+        <section class="card" id="controlsCard">
+          <div class="controls">
+            <div class="control-section">
+              <div class="section-title">Board</div>
+              <div class="btnrow">
+                <button class="primary" id="connectBtn" type="button">Connect Pixel Board</button>
+                <button id="getStatusBtn" type="button" disabled>Get status</button>
+                <button id="fullscreenBtn" type="button">Full screen</button>
+              </div>
+            </div>
+
+            <div class="control-section">
+              <div class="section-title">Content</div>
+              <div class="two">
+                <div>
+                  <label for="contentType">Content</label>
+                  <select id="contentType">
+                    <option value="text">Text</option>
+                    <option value="drawing">Drawing</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="color">Color</label>
+                  <input id="color" type="color" value="#00ff8c" />
+                </div>
+              </div>
+
+              <div class="field" id="textControls">
+                <label for="msg">Message</label>
+                <input id="msg" type="text" value="THIS SPACE INTENTIONALLY LEFT BLANK" />
+                <div class="help">Letters, numbers, spaces, and selected punctuation are supported.</div>
+              </div>
+
+              <div class="field" id="drawingControls" hidden>
+                <label>Drawing tools</label>
+                <div class="btnrow">
+                  <button class="tag on" id="brushLightPanel" type="button" aria-pressed="true">Brush</button>
+                  <button class="tag" id="brushErasePanel" type="button" aria-pressed="false">Erase</button>
+                  <button id="copyFramePanel" type="button">Copy frame</button>
+                  <button id="loadFramePanel" type="button">Load frame</button>
+                </div>
+                <div class="help" id="drawingPanelHint">Pause playback to edit the drawing.</div>
+              </div>
+            </div>
+
+            <div class="control-section">
+              <div class="section-title">Animation</div>
+              <div class="btnrow">
+                <button id="playPause" type="button" aria-pressed="false">Pause</button>
+                <button id="resetAnimationBtn" type="button">Reset</button>
+                <button id="clearBtn" type="button">Clear message</button>
+              </div>
+
+              <div class="two" style="margin-top:12px">
+                <div>
+                  <label for="effect">Effect</label>
+                  <select id="effect">
+                    <option value="still">Still</option>
+                    <option value="scroll">Scroll</option>
+                    <option value="wipe">Wipe reveal</option>
+                    <option value="blink">Blink</option>
+                  </select>
+                </div>
+                <div id="directionField">
+                  <label for="dir">Direction</label>
+                  <select id="dir">
+                    <option value="left">Left</option>
+                    <option value="right">Right</option>
+                    <option value="up">Up</option>
+                    <option value="down">Down</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="two" style="margin-top:12px">
+                <div id="speedField">
+                  <label for="speed">Speed</label>
+                  <input id="speed" type="range" min="10" max="200" value="40" />
+                  <div class="mini"><span id="speedVal">40</span> ms per tick</div>
+                </div>
+                <div>
+                  <label for="bright">Board brightness</label>
+                  <input id="bright" type="range" min="0.2" max="1" step="0.05" value="0.95" />
+                  <div class="mini"><span id="brightVal">0.95</span></div>
+                </div>
+              </div>
+
+              <div class="two" id="blinkRow" hidden>
+                <div>
+                  <label for="blinkOn">Blink on</label>
+                  <input id="blinkOn" type="range" min="100" max="1200" step="50" value="450" />
+                  <div class="mini"><span id="blinkOnVal">450</span> ms</div>
+                </div>
+                <div>
+                  <label for="blinkOff">Blink off</label>
+                  <input id="blinkOff" type="range" min="100" max="1200" step="50" value="350" />
+                  <div class="mini"><span id="blinkOffVal">350</span> ms</div>
+                </div>
+              </div>
+            </div>
+
+            <details class="control-section">
+              <summary>Advanced &amp; preview</summary>
+              <div class="advanced-content">
+                <label>Matrix size</label>
+                <div class="btnrow" style="margin-top:6px">
+                  <button type="button" data-preset="32x8">32 × 8</button>
+                  <button type="button" data-preset="64x16">64 × 16</button>
+                  <button type="button" data-preset="64x32">64 × 32</button>
+                </div>
+                <div class="help">These settings describe the logical LED matrix. Browser resizing only scales the preview.</div>
+
+                <div class="two">
+                  <div>
+                    <label for="mw">Matrix width</label>
+                    <input id="mw" type="number" value="64" min="8" max="256" />
+                  </div>
+                  <div>
+                    <label for="mh">Matrix height</label>
+                    <input id="mh" type="number" value="16" min="8" max="64" />
+                  </div>
+                </div>
+
+                <div class="two">
+                  <div>
+                    <label for="dot">Preview dot size</label>
+                    <input id="dot" type="range" min="4" max="16" value="10" />
+                    <div class="mini"><span id="dotVal">10</span> px</div>
+                  </div>
+                  <div>
+                    <label for="gap">Preview gap</label>
+                    <input id="gap" type="range" min="1" max="6" value="2" />
+                    <div class="mini"><span id="gapVal">2</span> px</div>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <div class="status" id="status" role="status" aria-live="polite"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+
+    /* =========================================================
+       Constants and font
+       ========================================================= */
+
+    const STORAGE_KEY = "pixel-board-state-v3";
+    const FRAME_FORMAT_VERSION = 1;
+    const PIXEL_OFF = false;
+    const PIXEL_ON = true;
+
+    const FONT_5X7 = {
+      " ": [0,0,0,0,0,0,0],
+      "!": [4,4,4,4,4,0,4],
+      "?": [14,17,1,2,4,0,4],
+      ".": [0,0,0,0,0,6,6],
+      ",": [0,0,0,0,0,6,4],
+      ":": [0,6,6,0,6,6,0],
+      "-": [0,0,0,31,0,0,0],
+      "_": [0,0,0,0,0,0,31],
+      "/": [1,2,4,8,16,0,0],
+      "0": [14,17,19,21,25,17,14],
+      "1": [4,12,4,4,4,4,14],
+      "2": [14,17,1,2,4,8,31],
+      "3": [30,1,1,14,1,1,30],
+      "4": [2,6,10,18,31,2,2],
+      "5": [31,16,16,30,1,1,30],
+      "6": [14,16,16,30,17,17,14],
+      "7": [31,1,2,4,8,8,8],
+      "8": [14,17,17,14,17,17,14],
+      "9": [14,17,17,15,1,1,14],
+      "A": [14,17,17,31,17,17,17],
+      "B": [30,17,17,30,17,17,30],
+      "C": [14,17,16,16,16,17,14],
+      "D": [28,18,17,17,17,18,28],
+      "E": [31,16,16,30,16,16,31],
+      "F": [31,16,16,30,16,16,16],
+      "G": [14,17,16,23,17,17,14],
+      "H": [17,17,17,31,17,17,17],
+      "I": [14,4,4,4,4,4,14],
+      "J": [7,2,2,2,18,18,12],
+      "K": [17,18,20,24,20,18,17],
+      "L": [16,16,16,16,16,16,31],
+      "M": [17,27,21,17,17,17,17],
+      "N": [17,25,21,19,17,17,17],
+      "O": [14,17,17,17,17,17,14],
+      "P": [30,17,17,30,16,16,16],
+      "Q": [14,17,17,17,21,18,13],
+      "R": [30,17,17,30,20,18,17],
+      "S": [15,16,16,14,1,1,30],
+      "T": [31,4,4,4,4,4,4],
+      "U": [17,17,17,17,17,17,14],
+      "V": [17,17,17,17,17,10,4],
+      "W": [17,17,17,17,21,27,17],
+      "X": [17,17,10,4,10,17,17],
+      "Y": [17,17,10,4,4,4,4],
+      "Z": [31,1,2,4,8,16,31]
+    };
+
+    const clamp = (number, minimum, maximum) =>
+      Math.max(minimum, Math.min(maximum, number));
+
+    const normalizeText = (text) =>
+      (text || "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9 !?.:,_\-\/]/g, " ");
+
+    const glyphFor = (character) =>
+      FONT_5X7[character] ?? FONT_5X7["?"];
+
+    /* =========================================================
+       Display model
+       ========================================================= */
+
+    function createPixelGrid(width, height, initialValue = PIXEL_OFF) {
+      return Array.from(
+        { length: height },
+        () => Array(width).fill(initialValue)
+      );
+    }
+
+    function createDisplay(width, height) {
+      return {
+        width,
+        height,
+        pixels: createPixelGrid(width, height)
+      };
+    }
+
+    function isInsideDisplay(display, x, y) {
+      return (
+        x >= 0 &&
+        x < display.width &&
+        y >= 0 &&
+        y < display.height
+      );
+    }
+
+    function setPixel(display, x, y, value) {
+      if (!isInsideDisplay(display, x, y)) {
+        return;
+      }
+
+      display.pixels[y][x] = Boolean(value);
+      renderNeeded = true;
+    }
+
+    function getPixel(display, x, y) {
+      if (!isInsideDisplay(display, x, y)) {
+        return PIXEL_OFF;
+      }
+
+      return display.pixels[y][x];
+    }
+
+    function clearDisplay(display) {
+      for (let y = 0; y < display.height; y += 1) {
+        for (let x = 0; x < display.width; x += 1) {
+          display.pixels[y][x] = PIXEL_OFF;
+        }
+      }
+
+      renderNeeded = true;
+    }
+
+    function resizeDisplay(display, newWidth, newHeight, preservePixels = true) {
+      const next = createDisplay(newWidth, newHeight);
+
+      if (preservePixels) {
+        const copyWidth = Math.min(display.width, newWidth);
+        const copyHeight = Math.min(display.height, newHeight);
+
+        for (let y = 0; y < copyHeight; y += 1) {
+          for (let x = 0; x < copyWidth; x += 1) {
+            next.pixels[y][x] = display.pixels[y][x];
+          }
+        }
+      }
+
+      return next;
+    }
+
+    function replaceDisplayPixels(display, sourcePixels) {
+      clearDisplay(display);
+
+      const rows = Math.min(display.height, sourcePixels.length);
+
+      for (let y = 0; y < rows; y += 1) {
+        if (!Array.isArray(sourcePixels[y])) {
+          continue;
+        }
+
+        const columns = Math.min(display.width, sourcePixels[y].length);
+
+        for (let x = 0; x < columns; x += 1) {
+          display.pixels[y][x] = Boolean(sourcePixels[y][x]);
+        }
+      }
+
+      renderNeeded = true;
+    }
+
+    /* =========================================================
+       Text and graphics
+       ========================================================= */
+
+    function buildTextBitmap(text, letterSpacing = 1) {
+      const characters = normalizeText(text).split("");
+      const rows = 7;
+      const columnsPerCharacter = 5 + letterSpacing;
+      const totalColumns = characters.length * columnsPerCharacter;
+      const pixels = createPixelGrid(totalColumns, rows);
+
+      characters.forEach((character, characterIndex) => {
+        const glyph = glyphFor(character);
+        const startX = characterIndex * columnsPerCharacter;
+
+        for (let row = 0; row < rows; row += 1) {
+          const bits = glyph[row] ?? 0;
+
+          for (let column = 0; column < 5; column += 1) {
+            pixels[row][startX + column] =
+              (bits & (1 << (4 - column))) !== 0;
+          }
+        }
+      });
+
+      return {
+        pixels,
+        rows,
+        columns: totalColumns
+      };
+    }
+
+    function blit(destination, sourcePixels, destinationX, destinationY, transparent = false) {
+      const sourceHeight = sourcePixels.length;
+      const sourceWidth = sourcePixels[0]?.length ?? 0;
+
+      for (let sourceY = 0; sourceY < sourceHeight; sourceY += 1) {
+        const targetY = sourceY + destinationY;
+
+        if (targetY < 0 || targetY >= destination.height) {
+          continue;
+        }
+
+        for (let sourceX = 0; sourceX < sourceWidth; sourceX += 1) {
+          const targetX = sourceX + destinationX;
+
+          if (targetX < 0 || targetX >= destination.width) {
+            continue;
+          }
+
+          const value = sourcePixels[sourceY][sourceX];
+
+          if (transparent && !value) {
+            continue;
+          }
+
+          destination.pixels[targetY][targetX] = value;
+        }
+      }
+
+      renderNeeded = true;
+    }
+
+    function buildCenteredTextFrame(text, width, height) {
+      const textBitmap = buildTextBitmap(text);
+      const frame = createDisplay(width, height);
+      const x = Math.floor((width - textBitmap.columns) / 2);
+      const y = Math.floor((height - textBitmap.rows) / 2);
+
+      blit(frame, textBitmap.pixels, x, y);
+      return frame;
+    }
+
+    function drawGridLine(display, start, end, value) {
+      let x0 = start.x;
+      let y0 = start.y;
+      const x1 = end.x;
+      const y1 = end.y;
+
+      const deltaX = Math.abs(x1 - x0);
+      const stepX = x0 < x1 ? 1 : -1;
+      const deltaY = -Math.abs(y1 - y0);
+      const stepY = y0 < y1 ? 1 : -1;
+
+      let error = deltaX + deltaY;
+
+      while (true) {
+        setPixel(display, x0, y0, value);
+
+        if (x0 === x1 && y0 === y1) {
+          break;
+        }
+
+        const doubledError = 2 * error;
+
+        if (doubledError >= deltaY) {
+          error += deltaY;
+          x0 += stepX;
+        }
+
+        if (doubledError <= deltaX) {
+          error += deltaX;
+          y0 += stepY;
+        }
+      }
+    }
+
+    function getContentBitmap() {
+      if (state.contentType === "drawing") {
+        return {
+          pixels: drawing.pixels,
+          rows: drawing.height,
+          columns: drawing.width
+        };
+      }
+
+      return buildTextBitmap(state.text);
+    }
+
+    function buildCenteredContentFrame() {
+      const content = getContentBitmap();
+      const frame = createDisplay(display.width, display.height);
+      const x = Math.floor((display.width - content.columns) / 2);
+      const y = Math.floor((display.height - content.rows) / 2);
+
+      blit(frame, content.pixels, x, y);
+      return frame;
+    }
+
+    /* =========================================================
+       Preview renderer
+       ========================================================= */
+
+    function roundRect(context, x, y, width, height, radius) {
+      const safeRadius = Math.min(radius, width / 2, height / 2);
+
+      context.beginPath();
+      context.moveTo(x + safeRadius, y);
+      context.arcTo(x + width, y, x + width, y + height, safeRadius);
+      context.arcTo(x + width, y + height, x, y + height, safeRadius);
+      context.arcTo(x, y + height, x, y, safeRadius);
+      context.arcTo(x, y, x + width, y, safeRadius);
+      context.closePath();
+    }
+
+    function resizeCanvasForPreview() {
+      const pitch = state.previewDotSize + state.previewGap;
+      elements.canvas.width =
+        display.width * pitch + state.previewGap;
+      elements.canvas.height =
+        display.height * pitch + state.previewGap;
+
+      renderNeeded = true;
+    }
+
+    function renderCanvas() {
+      const context = elements.canvas.getContext("2d");
+      const pitch = state.previewDotSize + state.previewGap;
+      const width = elements.canvas.width;
+      const height = elements.canvas.height;
+
+      const color = hexToRgb(state.color);
+
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = "#090b10";
+      context.fillRect(0, 0, width, height);
+
+      for (let y = 0; y < display.height; y += 1) {
+        for (let x = 0; x < display.width; x += 1) {
+          const drawX = state.previewGap + x * pitch;
+          const drawY = state.previewGap + y * pitch;
+          const radius = Math.max(1, Math.floor(state.previewDotSize / 4));
+          const isOn = getPixel(display, x, y);
+
+          if (isOn) {
+            context.fillStyle =
+  `rgba(${color.red}, ${color.green}, ${color.blue}, ${state.brightness})`;
+            roundRect(
+              context,
+              drawX,
+              drawY,
+              state.previewDotSize,
+              state.previewDotSize,
+              radius
+            );
+            context.fill();
+
+            context.fillStyle =
+  `rgba(${color.red}, ${color.green}, ${color.blue}, ${state.brightness * 0.15})`;
+            roundRect(
+              context,
+              drawX - 1,
+              drawY - 1,
+              state.previewDotSize + 2,
+              state.previewDotSize + 2,
+              radius + 1
+            );
+            context.fill();
+          } else {
+            context.fillStyle = "rgba(0, 0, 0, 0.35)";
+            roundRect(
+              context,
+              drawX,
+              drawY,
+              state.previewDotSize,
+              state.previewDotSize,
+              radius
+            );
+            context.fill();
+          }
+        }
+      }
+
+      context.strokeStyle = "rgba(255, 255, 255, 0.08)";
+      context.lineWidth = 2;
+      context.strokeRect(1, 1, width - 2, height - 2);
+    }
+
+    /* =========================================================
+       Serialization
+       ========================================================= */
+
+    function createFramePayload() {
+      const source =
+        state.contentType === "drawing" ? drawing : display;
+
+      return {
+        version: FRAME_FORMAT_VERSION,
+        type: "frame",
+        width: source.width,
+        height: source.height,
+        pixels: source.pixels
+      };
+    }
+
+    function validateFramePayload(payload) {
+      if (!payload || typeof payload !== "object") {
+        throw new Error("The pasted value is not an object.");
+      }
+
+      if (payload.type !== "frame") {
+        throw new Error("The data is not a frame.");
+      }
+
+      if (Number(payload.version) !== FRAME_FORMAT_VERSION) {
+        throw new Error("This frame version is not supported.");
+      }
+
+      if (!Array.isArray(payload.pixels)) {
+        throw new Error("The frame does not contain a pixel array.");
+      }
+
+      const width = clamp(Number(payload.width), 8, 256);
+      const height = clamp(Number(payload.height), 8, 64);
+
+      if (!Number.isFinite(width) || !Number.isFinite(height)) {
+        throw new Error("The frame dimensions are invalid.");
+      }
+
+      return {
+        width,
+        height,
+        pixels: payload.pixels
+      };
+    }
+
+    function hexToRgb(hex) {
+  const value = hex.replace("#", "");
+
+  return {
+    red: parseInt(value.slice(0, 2), 16),
+    green: parseInt(value.slice(2, 4), 16),
+    blue: parseInt(value.slice(4, 6), 16)
+  };
+}
+
+function updateContentAccent(hex) {
+  const color = hexToRgb(hex);
+
+  document.documentElement.style.setProperty(
+    "--content-accent",
+    `${color.red}, ${color.green}, ${color.blue}`
+  );
+
+  // Pick readable text for controls filled with the selected color.
+  const luminance =
+    (0.2126 * color.red +
+     0.7152 * color.green +
+     0.0722 * color.blue) / 255;
+
+  document.documentElement.style.setProperty(
+    "--content-accent-ink",
+    luminance > 0.58 ? "#07110b" : "#f7faf9"
+  );
+}
+
+    /* =========================================================
+       Application state
+       ========================================================= */
+
+    const elements = {
+      canvas: document.getElementById("canvas"),
+      connectionDot: document.getElementById("connectionDot"),
+      bezelLabel: document.getElementById("bezelLabel"),
+      connectBtn: document.getElementById("connectBtn"),
+      getStatusBtn: document.getElementById("getStatusBtn"),
+      resolutionLabel: document.getElementById("resolutionLabel"),
+      pointerLabel: document.getElementById("pointerLabel"),
+      playPause: document.getElementById("playPause"),
+      resetAnimationBtn: document.getElementById("resetAnimationBtn"),
+      clearBtn: document.getElementById("clearBtn"),
+      fullscreenBtn: document.getElementById("fullscreenBtn"),
+      toggleControlsBtn: document.getElementById("toggleControlsBtn"),
+      controlsWrap: document.getElementById("controlsWrap"),
+      msg: document.getElementById("msg"),
+      contentType: document.getElementById("contentType"),
+      effect: document.getElementById("effect"),
+      textControls: document.getElementById("textControls"),
+      drawingControls: document.getElementById("drawingControls"),
+      drawingPanelHint: document.getElementById("drawingPanelHint"),
+      directionField: document.getElementById("directionField"),
+      speedField: document.getElementById("speedField"),
+      dir: document.getElementById("dir"),
+      speed: document.getElementById("speed"),
+      bright: document.getElementById("bright"),
+      color: document.getElementById("color"),
+      mw: document.getElementById("mw"),
+      mh: document.getElementById("mh"),
+      dot: document.getElementById("dot"),
+      gap: document.getElementById("gap"),
+      speedVal: document.getElementById("speedVal"),
+      brightVal: document.getElementById("brightVal"),
+      dotVal: document.getElementById("dotVal"),
+      gapVal: document.getElementById("gapVal"),
+      blinkRow: document.getElementById("blinkRow"),
+      blinkOn: document.getElementById("blinkOn"),
+      blinkOff: document.getElementById("blinkOff"),
+      blinkOnVal: document.getElementById("blinkOnVal"),
+      blinkOffVal: document.getElementById("blinkOffVal"),
+      brushLightPanel: document.getElementById("brushLightPanel"),
+      brushErasePanel: document.getElementById("brushErasePanel"),
+      copyFramePanel: document.getElementById("copyFramePanel"),
+      loadFramePanel: document.getElementById("loadFramePanel"),
+      status: document.getElementById("status")
+    };
+
+    let state = {
+      text: "THIS SPACE INTENTIONALLY LEFT BLANK",
+      contentType: "text",
+      effect: "scroll",
+      direction: "left",
+      speed: 40,
+      brightness: 0.95,
+      color: "#00ff8c",
+      paused: false,
+      blinkOnMs: 450,
+      blinkOffMs: 350,
+      doodleOn: true,
+      previewDotSize: 10,
+      previewGap: 2
+    };
+
+    let display = createDisplay(64, 16);
+    let drawing = createDisplay(64, 16);
+    let textBitmap = buildTextBitmap(state.text);
+
+    let animation = {
+      x: display.width,
+      y: Math.floor((display.height - textBitmap.rows) / 2),
+      wipe: 0,
+      blinkVisible: true,
+      nextBlinkAt: performance.now() + state.blinkOnMs
+    };
+
+    let pointerDown = false;
+    let previousDoodleCell = null;
+    let renderNeeded = true;
+    let lastTickAt = performance.now();
+    let serialPort = null;
+    let serialReader = null;
+    let serialReceiveBuffer = "";
+
+    function rgbToHex(red, green, blue) {
+  return "#" +
+    [red, green, blue]
+      .map(value =>
+        Number(value)
+          .toString(16)
+          .padStart(2, "0")
+      )
+      .join("");
+}
+
+    /* =========================================================
+       Persistence
+       ========================================================= */
+
+    function saveApplicationState() {
+      const saved = {
+        version: 3,
+        state,
+        display: {
+          width: display.width,
+          height: display.height
+        },
+        drawing: drawing.pixels
+      };
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+    }
+
+    function loadApplicationState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+
+        if (!raw) {
+          return;
+        }
+
+        const saved = JSON.parse(raw);
+
+        if (saved?.version !== 3) {
+          return;
+        }
+
+        state = {
+          ...state,
+          ...saved.state
+        };
+
+        const width = clamp(Number(saved.display?.width ?? 64), 8, 256);
+        const height = clamp(Number(saved.display?.height ?? 16), 8, 64);
+
+        display = createDisplay(width, height);
+        drawing = createDisplay(width, height);
+
+        if (Array.isArray(saved.drawing)) {
+          replaceDisplayPixels(drawing, saved.drawing);
+        }
+      } catch (error) {
+        console.warn("Could not restore saved state.", error);
+      }
+    }
+
+    /* =========================================================
+       UI synchronization
+       ========================================================= */
+
+    function setStatus(message) {
+      elements.status.textContent = message;
+
+      window.clearTimeout(setStatus.timeoutId);
+      setStatus.timeoutId = window.setTimeout(() => {
+        elements.status.textContent = "";
+      }, 2500);
+    }
+
+    function updateBezel() {
+      const contentLabel =
+        state.contentType === "drawing" ? "DRAWING" : "TEXT";
+
+      if (state.effect === "still") {
+        elements.bezelLabel.textContent = `${contentLabel} · STILL`;
+      } else if (state.effect === "blink") {
+        elements.bezelLabel.textContent = `${contentLabel} · BLINK`;
+      } else {
+        elements.bezelLabel.textContent =
+          `${contentLabel} · ${state.effect.toUpperCase()} ${state.direction.toUpperCase()}`;
+      }
+    }
+
+    function syncUI() {
+      elements.msg.value = state.text;
+      elements.contentType.value = state.contentType;
+      elements.effect.value = state.effect;
+      elements.dir.value = state.direction;
+      elements.speed.value = String(state.speed);
+      elements.bright.value = String(state.brightness);
+      elements.color.value = state.color;
+      updateContentAccent(state.color);
+      elements.mw.value = String(display.width);
+      elements.mh.value = String(display.height);
+      elements.dot.value = String(state.previewDotSize);
+      elements.gap.value = String(state.previewGap);
+      elements.blinkOn.value = String(state.blinkOnMs);
+      elements.blinkOff.value = String(state.blinkOffMs);
+
+      elements.speedVal.textContent = String(state.speed);
+      elements.brightVal.textContent = state.brightness.toFixed(2);
+      elements.dotVal.textContent = String(state.previewDotSize);
+      elements.gapVal.textContent = String(state.previewGap);
+      elements.blinkOnVal.textContent = String(state.blinkOnMs);
+      elements.blinkOffVal.textContent = String(state.blinkOffMs);
+
+      elements.playPause.textContent =
+        state.paused ? "Play" : "Pause";
+      elements.playPause.setAttribute(
+        "aria-pressed",
+        String(state.paused)
+      );
+
+      const isDrawing = state.contentType === "drawing";
+      const canEditDrawing = isDrawing && state.paused;
+      const usesDirection =
+        state.effect === "scroll" || state.effect === "wipe";
+      const usesSpeed =
+        state.effect === "scroll" ||
+        state.effect === "wipe" ||
+        state.effect === "blink";
+
+      elements.clearBtn.textContent =
+        isDrawing ? "Clear drawing" : "Clear message";
+
+      // Content-specific controls
+      elements.textControls.hidden = isDrawing;
+      elements.drawingControls.hidden = !isDrawing;
+
+      // Effect-specific controls
+      elements.directionField.hidden = !usesDirection;
+      elements.speedField.hidden = !usesSpeed;
+      elements.blinkRow.hidden = state.effect !== "blink";
+
+      elements.dir.disabled = !usesDirection;
+      elements.speed.disabled = !usesSpeed;
+      elements.resetAnimationBtn.disabled = state.effect === "still";
+
+      const drawingHintText = canEditDrawing
+        ? "Drawing is editable while playback is paused."
+        : "Pause playback to edit the drawing.";
+
+      elements.drawingPanelHint.textContent = drawingHintText;
+
+      elements.brushLightPanel.classList.toggle("on", state.doodleOn);
+      elements.brushErasePanel.classList.toggle("off", !state.doodleOn);
+
+      elements.brushLightPanel.setAttribute(
+        "aria-pressed",
+        String(state.doodleOn)
+      );
+      elements.brushErasePanel.setAttribute(
+        "aria-pressed",
+        String(!state.doodleOn)
+      );
+
+      elements.resolutionLabel.textContent =
+        `${display.width} × ${display.height} logical pixels`;
+
+      updateBezel();
+    }
+
+    /* =========================================================
+       Animation engine
+       ========================================================= */
+
+    function resetAnimation() {
+      textBitmap = getContentBitmap();
+      animation.wipe = 0;
+      animation.blinkVisible = true;
+      animation.nextBlinkAt =
+        performance.now() + state.blinkOnMs;
+
+      if (state.direction === "left") {
+        animation.x = display.width;
+        animation.y =
+          Math.floor((display.height - textBitmap.rows) / 2);
+      } else if (state.direction === "right") {
+        animation.x = -textBitmap.columns;
+        animation.y =
+          Math.floor((display.height - textBitmap.rows) / 2);
+      } else if (state.direction === "up") {
+        animation.y = display.height;
+        animation.x =
+          Math.floor((display.width - textBitmap.columns) / 2);
+      } else {
+        animation.y = -textBitmap.rows;
+        animation.x =
+          Math.floor((display.width - textBitmap.columns) / 2);
+      }
+
+      if (state.effect === "still" || state.effect === "blink") {
+        display = buildCenteredContentFrame();
+      } else {
+        clearDisplay(display);
+
+        if (state.effect === "scroll") {
+          blit(
+            display,
+            textBitmap.pixels,
+            animation.x,
+            animation.y
+          );
+        }
+      }
+
+      renderNeeded = true;
+    }
+
+    function updateBlink(now) {
+      if (now < animation.nextBlinkAt) {
+        return false;
+      }
+
+      animation.blinkVisible = !animation.blinkVisible;
+      animation.nextBlinkAt =
+        now +
+        (
+          animation.blinkVisible
+            ? state.blinkOnMs
+            : state.blinkOffMs
+        );
+
+      if (animation.blinkVisible) {
+        display = buildCenteredContentFrame();
+      } else {
+        clearDisplay(display);
+      }
+
+      return true;
+    }
+
+    function updateWipe() {
+      animation.wipe += 1;
+
+      const centered = buildCenteredContentFrame();
+      clearDisplay(display);
+
+      if (state.direction === "left") {
+        const limit = clamp(animation.wipe, 0, display.width);
+        for (let y = 0; y < display.height; y += 1) {
+          for (let x = 0; x < limit; x += 1) {
+            display.pixels[y][x] = centered.pixels[y][x];
+          }
+        }
+      } else if (state.direction === "right") {
+        const limit = clamp(animation.wipe, 0, display.width);
+        for (let y = 0; y < display.height; y += 1) {
+          for (let x = display.width - 1; x >= display.width - limit; x -= 1) {
+            display.pixels[y][x] = centered.pixels[y][x];
+          }
+        }
+      } else if (state.direction === "up") {
+        const limit = clamp(animation.wipe, 0, display.height);
+        for (let y = 0; y < limit; y += 1) {
+          for (let x = 0; x < display.width; x += 1) {
+            display.pixels[y][x] = centered.pixels[y][x];
+          }
+        }
+      } else {
+        const limit = clamp(animation.wipe, 0, display.height);
+        for (let y = display.height - 1; y >= display.height - limit; y -= 1) {
+          for (let x = 0; x < display.width; x += 1) {
+            display.pixels[y][x] = centered.pixels[y][x];
+          }
+        }
+      }
+
+      const resetLimit =
+        state.direction === "left" || state.direction === "right"
+          ? display.width + 8
+          : display.height + 6;
+
+      if (animation.wipe > resetLimit) {
+        animation.wipe = 0;
+      }
+
+      renderNeeded = true;
+      return true;
+    }
+
+    function updateScroll() {
+      clearDisplay(display);
+
+      if (state.direction === "left") {
+        animation.x -= 1;
+        if (animation.x < -textBitmap.columns) {
+          animation.x = display.width;
+        }
+      } else if (state.direction === "right") {
+        animation.x += 1;
+        if (animation.x > display.width) {
+          animation.x = -textBitmap.columns;
+        }
+      } else if (state.direction === "up") {
+        animation.y -= 1;
+        if (animation.y < -textBitmap.rows) {
+          animation.y = display.height;
+        }
+      } else {
+        animation.y += 1;
+        if (animation.y > display.height) {
+          animation.y = -textBitmap.rows;
+        }
+      }
+
+      blit(
+        display,
+        textBitmap.pixels,
+        animation.x,
+        animation.y
+      );
+
+      return true;
+    }
+
+    function updateAnimation(now) {
+      if (state.paused || state.effect === "still") {
+        return false;
+      }
+
+      const interval = clamp(state.speed, 10, 200);
+
+      if (now - lastTickAt < interval) {
+        return false;
+      }
+
+      lastTickAt = now;
+
+      if (state.effect === "blink") {
+        return updateBlink(now);
+      }
+
+      if (state.effect === "wipe") {
+        return updateWipe();
+      }
+
+      return updateScroll();
+    }
+
+    function applicationLoop(now) {
+      updateAnimation(now);
+
+      if (renderNeeded) {
+        renderCanvas();
+        renderNeeded = false;
+      }
+
+      requestAnimationFrame(applicationLoop);
+    }
+
+    /* =========================================================
+       Pointer and doodle handling
+       ========================================================= */
+
+    function canvasToCell(event) {
+      const rectangle = elements.canvas.getBoundingClientRect();
+      const canvasX =
+        (event.clientX - rectangle.left) *
+        (elements.canvas.width / rectangle.width);
+      const canvasY =
+        (event.clientY - rectangle.top) *
+        (elements.canvas.height / rectangle.height);
+
+      const pitch = state.previewDotSize + state.previewGap;
+      const relativeX = canvasX - state.previewGap;
+      const relativeY = canvasY - state.previewGap;
+
+      if (relativeX < 0 || relativeY < 0) {
+        return null;
+      }
+
+      const x = Math.floor(relativeX / pitch);
+      const y = Math.floor(relativeY / pitch);
+
+      if (!isInsideDisplay(display, x, y)) {
+        return null;
+      }
+
+      const localX = relativeX % pitch;
+      const localY = relativeY % pitch;
+
+      if (
+        localX >= state.previewDotSize ||
+        localY >= state.previewDotSize
+      ) {
+        return null;
+      }
+
+      return { x, y };
+    }
+
+    function updatePointerLabel(event) {
+      const cell = canvasToCell(event);
+
+      elements.pointerLabel.textContent = cell
+        ? `x: ${cell.x}, y: ${cell.y}`
+        : "x: —, y: —";
+    }
+
+    function applyDoodleAt(event) {
+      const cell = canvasToCell(event);
+
+      if (!cell) {
+        return;
+      }
+
+      if (previousDoodleCell) {
+        drawGridLine(
+          drawing,
+          previousDoodleCell,
+          cell,
+          state.doodleOn
+        );
+      } else {
+        setPixel(drawing, cell.x, cell.y, state.doodleOn);
+      }
+
+      previousDoodleCell = cell;
+      display = buildCenteredContentFrame();
+      renderNeeded = true;
+      saveApplicationState();
+    }
+
+    /* =========================================================
+   ESP32 serial connection
+   ========================================================= */
+
+async function connectPixelBoard() {
+  try {
+    serialPort = await navigator.serial.requestPort();
+
+    await serialPort.open({
+      baudRate: 115200
+    });
+
+    elements.connectBtn.textContent = "Pixel Board connected";
+    elements.connectBtn.disabled = true;
+    elements.connectionDot.classList.add("connected");
+    elements.getStatusBtn.disabled = false;
+
+    setStatus("Connected to Pixel Board.");
+
+    readSerial();
+await new Promise(resolve =>
+  setTimeout(resolve, 2000)
+);
+
+sendSerialCommand("STATUS");
+
+  } catch (error) {
+    console.error(error);
+    elements.connectionDot.classList.remove("connected");
+    setStatus("Could not connect to Pixel Board.");
+  }
+}
+
+async function sendSerialCommand(command) {
+  if (!serialPort?.writable) {
+    setStatus("Pixel Board is not connected.");
+    return;
+  }
+
+  const writer = serialPort.writable.getWriter();
+
+  try {
+    const encoder = new TextEncoder();
+
+    await writer.write(
+      encoder.encode(command + "\n")
+    );
+  } finally {
+    writer.releaseLock();
+  }
+}
+
+async function readSerial() {
+  const decoder = new TextDecoder();
+
+  while (serialPort?.readable) {
+    serialReader = serialPort.readable.getReader();
+
+    try {
+      while (true) {
+        const { value, done } =
+          await serialReader.read();
+
+        if (done) {
+          break;
+        }
+
+        if (value) {
+          serialReceiveBuffer +=
+            decoder.decode(value, {
+              stream: true
+            });
+
+          let newlineIndex;
+
+          while (
+            (newlineIndex =
+              serialReceiveBuffer.indexOf("\n")) !== -1
+          ) {
+            const line =
+              serialReceiveBuffer.substring(
+                0,
+                newlineIndex
+              );
+
+            serialReceiveBuffer =
+              serialReceiveBuffer.substring(
+                newlineIndex + 1
+              );
+
+            processSerialLine(line);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Serial read error:",
+        error
+      );
+    } finally {
+      serialReader.releaseLock();
+      serialReader = null;
+    }
+  }
+}
+
+function processSerialLine(line) {
+  line = line.trim();
+
+  if (!line) {
+    return;
+  }
+
+  console.log("ESP32:", line);
+
+  if (!line.startsWith("STATUS:")) {
+    return;
+  }
+
+  const statusText = line.substring(7);
+
+  const parts = statusText.split(";");
+
+  const values = {};
+
+  for (const part of parts) {
+    const separatorIndex = part.indexOf("=");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const key = part.substring(0, separatorIndex);
+    const value = part.substring(separatorIndex + 1);
+
+    values[key] = value;
+  }
+
+  if (values.MESSAGE !== undefined) {
+    state.text = values.MESSAGE;
+  }
+
+  if (values.SPEED !== undefined) {
+    state.speed = Number(values.SPEED);
+  }
+
+  if (values.COLOR !== undefined) {
+    const [red, green, blue] =
+      values.COLOR.split(",").map(Number);
+
+    state.color = rgbToHex(red, green, blue);
+  }
+
+  if (values.BRIGHTNESS !== undefined) {
+    const hardwareBrightness =
+      Number(values.BRIGHTNESS);
+
+    state.brightness = clamp(
+      (hardwareBrightness + 4) / 25,
+      0.2,
+      1
+    );
+  }
+
+  resetAnimation();
+  syncUI();
+  saveApplicationState();
+
+  setStatus("Pixel Board settings synchronized.");
+}
+
+    /* =========================================================
+       Event handlers
+       ========================================================= */
+
+    function setControlsCollapsed(collapsed) {
+      elements.controlsWrap.classList.toggle(
+        "collapsed",
+        collapsed
+      );
+      elements.toggleControlsBtn.textContent =
+        collapsed ? "Show controls" : "Hide controls";
+    }
+
+    elements.connectBtn.addEventListener("click", () => {
+    connectPixelBoard();
+    });
+
+    elements.getStatusBtn.addEventListener("click", () => {
+    sendSerialCommand("STATUS");
+    });
+
+    async function toggleFullscreen() {
+      const isFullscreen = Boolean(document.fullscreenElement);
+
+      try {
+        if (isFullscreen) {
+          await document.exitFullscreen();
+        } else {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch {
+        setStatus("Fullscreen is blocked by the browser.");
+      }
+    }
+
+    function applyMatrixSize(width, height) {
+      const safeWidth = clamp(Number(width), 8, 256);
+      const safeHeight = clamp(Number(height), 8, 64);
+      display = resizeDisplay(
+        display,
+        safeWidth,
+        safeHeight,
+        false
+      );
+      drawing = resizeDisplay(
+        drawing,
+        safeWidth,
+        safeHeight,
+        true
+      );
+
+      resizeCanvasForPreview();
+      resetAnimation();
+      syncUI();
+      saveApplicationState();
+    }
+
+    elements.toggleControlsBtn.addEventListener("click", () => {
+      const collapsed =
+        !elements.controlsWrap.classList.contains("collapsed");
+
+      setControlsCollapsed(collapsed);
+    });
+
+    elements.playPause.addEventListener("click", () => {
+      state.paused = !state.paused;
+
+      if (state.paused && state.contentType === "drawing") {
+        display = buildCenteredContentFrame();
+        renderNeeded = true;
+      } else if (!state.paused) {
+        resetAnimation();
+      }
+
+      syncUI();
+      saveApplicationState();
+    });
+
+    elements.resetAnimationBtn.addEventListener("click", () => {
+      resetAnimation();
+      setStatus("Animation reset.");
+    });
+
+    elements.clearBtn.addEventListener("click", () => {
+      if (state.contentType === "drawing") {
+        clearDisplay(drawing);
+        display = buildCenteredContentFrame();
+        renderNeeded = true;
+        saveApplicationState();
+        setStatus("Drawing cleared.");
+        return;
+      }
+
+      state.text = "";
+      clearDisplay(display);
+      resetAnimation();
+      syncUI();
+      saveApplicationState();
+      setStatus("Message cleared.");
+    });
+
+    elements.fullscreenBtn.addEventListener(
+      "click",
+      toggleFullscreen
+    );
+
+    document.addEventListener("fullscreenchange", () => {
+      const isFullscreen = Boolean(document.fullscreenElement);
+
+      document.body.classList.toggle(
+        "fullscreen",
+        isFullscreen
+      );
+      elements.fullscreenBtn.textContent =
+        isFullscreen ? "Exit full screen" : "Full screen";
+
+      renderNeeded = true;
+    });
+
+    elements.msg.addEventListener("input", (event) => {
+  state.text = event.target.value;
+
+  resetAnimation();
+  saveApplicationState();
+
+  if (serialPort?.writable) {
+    sendSerialCommand(`MESSAGE:${state.text}`);
+  }
+});
+
+    elements.contentType.addEventListener("change", (event) => {
+      state.contentType = event.target.value;
+
+      if (state.contentType === "drawing") {
+        state.paused = true;
+      }
+
+      syncUI();
+      resetAnimation();
+      saveApplicationState();
+    });
+
+    elements.effect.addEventListener("change", (event) => {
+      state.effect = event.target.value;
+      syncUI();
+      resetAnimation();
+      saveApplicationState();
+    });
+
+    elements.dir.addEventListener("change", (event) => {
+      state.direction = event.target.value;
+      syncUI();
+      resetAnimation();
+      saveApplicationState();
+    });
+
+    elements.speed.addEventListener("input", (event) => {
+  state.speed = Number(event.target.value);
+  elements.speedVal.textContent = String(state.speed);
+  saveApplicationState();
+
+  if (serialPort?.writable) {
+    sendSerialCommand(`SPEED:${state.speed}`);
+  }
+});
+
+elements.bright.addEventListener("input", (event) => {
+  state.brightness = Number(event.target.value);
+
+  elements.brightVal.textContent =
+    state.brightness.toFixed(2);
+
+  renderNeeded = true;
+  saveApplicationState();
+
+  if (serialPort?.writable) {
+    const hardwareBrightness =
+      Math.round(state.brightness * 25)-4;
+
+    sendSerialCommand(
+      `BRIGHTNESS:${hardwareBrightness}`
+    );
+  }
+});
+
+    elements.mw.addEventListener("change", () => {
+      applyMatrixSize(elements.mw.value, display.height);
+    });
+
+    elements.mh.addEventListener("change", () => {
+      applyMatrixSize(display.width, elements.mh.value);
+    });
+
+    document.querySelectorAll("[data-preset]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const [width, height] =
+          button.dataset.preset.split("x").map(Number);
+
+        applyMatrixSize(width, height);
+      });
+    });
+
+    elements.dot.addEventListener("input", (event) => {
+      state.previewDotSize = Number(event.target.value);
+      elements.dotVal.textContent =
+        String(state.previewDotSize);
+      resizeCanvasForPreview();
+      saveApplicationState();
+    });
+
+    elements.gap.addEventListener("input", (event) => {
+      state.previewGap = Number(event.target.value);
+      elements.gapVal.textContent =
+        String(state.previewGap);
+      resizeCanvasForPreview();
+      saveApplicationState();
+    });
+
+    elements.blinkOn.addEventListener("input", (event) => {
+      state.blinkOnMs = Number(event.target.value);
+      elements.blinkOnVal.textContent =
+        String(state.blinkOnMs);
+      resetAnimation();
+      saveApplicationState();
+    });
+
+    elements.blinkOff.addEventListener("input", (event) => {
+      state.blinkOffMs = Number(event.target.value);
+      elements.blinkOffVal.textContent =
+        String(state.blinkOffMs);
+      resetAnimation();
+      saveApplicationState();
+    });
+
+    elements.brushLightPanel.addEventListener("click", () => {
+      state.doodleOn = true;
+      syncUI();
+      saveApplicationState();
+    });
+
+    elements.brushErasePanel.addEventListener("click", () => {
+      state.doodleOn = false;
+      syncUI();
+      saveApplicationState();
+    });
+
+    async function copyCurrentFrame() {
+      const text = JSON.stringify(createFramePayload());
+
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus("Frame JSON copied to the clipboard.");
+      } catch {
+        window.prompt(
+          "Clipboard access was blocked. Copy the frame JSON:",
+          text
+        );
+      }
+    }
+
+    function loadFrameFromPrompt() {
+      const raw = window.prompt(
+        "Paste versioned frame JSON:"
+      );
+
+      if (!raw) {
+        return;
+      }
+
+      try {
+        const parsed = validateFramePayload(JSON.parse(raw));
+
+        display = createDisplay(parsed.width, parsed.height);
+        drawing = createDisplay(parsed.width, parsed.height);
+        replaceDisplayPixels(drawing, parsed.pixels);
+        state.contentType = "drawing";
+        state.effect = "still";
+        state.paused = true;
+        display = buildCenteredContentFrame();
+
+        resizeCanvasForPreview();
+        syncUI();
+        saveApplicationState();
+        setStatus("Drawing loaded.");
+      } catch (error) {
+        setStatus(error.message || "Could not load the frame.");
+      }
+    }
+
+    elements.copyFramePanel.addEventListener("click", copyCurrentFrame);
+    elements.loadFramePanel.addEventListener("click", loadFrameFromPrompt);
+
+    elements.canvas.addEventListener("pointerdown", (event) => {
+      if (state.contentType !== "drawing") {
+        return;
+      }
+
+      if (!state.paused) {
+        setStatus("Pause playback before editing the drawing.");
+        return;
+      }
+
+      pointerDown = true;
+      previousDoodleCell = null;
+      elements.canvas.setPointerCapture?.(event.pointerId);
+      applyDoodleAt(event);
+    });
+
+    elements.canvas.addEventListener("pointermove", (event) => {
+      updatePointerLabel(event);
+
+      if (
+        state.contentType !== "drawing" ||
+        !state.paused ||
+        !pointerDown
+      ) {
+        return;
+      }
+
+      applyDoodleAt(event);
+    });
+
+    elements.canvas.addEventListener("pointerleave", () => {
+      elements.pointerLabel.textContent = "x: —, y: —";
+    });
+
+    window.addEventListener("pointerup", () => {
+      pointerDown = false;
+      previousDoodleCell = null;
+    });
+
+elements.color.addEventListener("input", (event) => {
+  state.color = event.target.value;
+  updateContentAccent(state.color);
+
+  renderNeeded = true;
+  saveApplicationState();
+
+  if (serialPort?.writable) {
+    const color = hexToRgb(state.color);
+
+    sendSerialCommand(
+      `COLOR:${color.red},${color.green},${color.blue}`
+    );
+  }
+});
+
+    /* =========================================================
+       Startup
+       ========================================================= */
+
+    loadApplicationState();
+    setControlsCollapsed(false);
+    resizeCanvasForPreview();
+    syncUI();
+
+    resetAnimation();
+
+    requestAnimationFrame(applicationLoop);
+  </script>
+</body>
+</html>
