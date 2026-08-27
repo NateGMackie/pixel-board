@@ -153,6 +153,16 @@
       pointer-events: none;
     }
 
+    body.controls-hidden .grid {
+      grid-template-columns: 1fr;
+    }
+
+    body.controls-hidden #displayCard {
+      width: min(920px, 100%);
+      margin-inline: auto;
+      position: static;
+    }
+
     .card {
       width: 100%;
       border: 1px solid var(--border);
@@ -421,21 +431,45 @@
       color: var(--text-secondary);
     }
 
-    body.fullscreen { padding: 0; }
+    body.fullscreen {
+      padding: 0;
+      background: #070809;
+    }
 
     body.fullscreen header,
-    body.fullscreen #controlsCard { display: none; }
+    body.fullscreen #controlsWrap {
+      display: none;
+    }
+
+    body.fullscreen .wrap {
+      width: 100%;
+      min-height: 100vh;
+    }
+
+    body.fullscreen .grid {
+      grid-template-columns: 1fr;
+      min-height: 100vh;
+      align-items: center;
+    }
 
     body.fullscreen #displayCard {
-      min-height: 100vh;
+      width: min(1180px, calc(100% - 24px));
+      min-height: auto;
+      margin: auto;
       padding: 12px;
       border: 0;
       border-radius: 0;
       display: flex;
       flex-direction: column;
+      align-items: stretch;
       justify-content: center;
       background: #070809;
       box-shadow: none;
+    }
+
+    body.fullscreen .canvas-frame {
+      width: 100%;
+      margin-inline: auto;
     }
 
     @media (min-width: 980px) {
@@ -1835,6 +1869,12 @@ function processSerialLine(line) {
         "collapsed",
         collapsed
       );
+
+      document.body.classList.toggle(
+        "controls-hidden",
+        collapsed
+      );
+
       elements.toggleControlsBtn.textContent =
         collapsed ? "Show controls" : "Hide controls";
     }
