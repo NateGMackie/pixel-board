@@ -1,3 +1,5 @@
+This is a scrolling marquee project using a 32x8 LED matrix and an esp32. 
+
 Planned features:
 1. Wi-fi control access
 2. preset modes (clock, low-fi visual)
@@ -8,4 +10,3 @@ Planned features:
 7. preset colors
 8. safe guards for color picker based on brightness level
 9. sync in app scroll speed and matrix scroll speed
-10. 
