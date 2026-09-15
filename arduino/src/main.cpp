@@ -3,6 +3,7 @@
 
 void showDisplay();
 void printStatus();
+void resetAnimation();
 
 // -------------------------
 // Display Configuration
@@ -851,30 +852,496 @@ void showDisplay()
 // -------------------------
 
 const int MESSAGE_BUFFER_SIZE = 100;
+const int COMMAND_BUFFER_SIZE = 256;
+const int FRAME_ROW_HEX_LENGTH = DISPLAY_WIDTH * 6;
+
+enum AnimationEffect
+{
+    EFFECT_STILL,
+    EFFECT_SCROLL,
+    EFFECT_WIPE,
+    EFFECT_BLINK
+};
+
+enum AnimationDirection
+{
+    DIRECTION_LEFT,
+    DIRECTION_RIGHT,
+    DIRECTION_UP,
+    DIRECTION_DOWN
+};
+
+enum ContentMode
+{
+    MODE_TEXT,
+    MODE_DRAWING
+};
 
 char message[MESSAGE_BUFFER_SIZE] = "HELLO WORLD!";
-char inputBuffer[MESSAGE_BUFFER_SIZE];
+char inputBuffer[COMMAND_BUFFER_SIZE];
 
 int inputIndex = 0;
 
 Color messageColor = WHITE;
 const int TEXT_Y = 1;
-unsigned long scrollInterval = 100;
+int animationSpeed = 10;
+unsigned long blinkOnMs = 450;
+unsigned long blinkOffMs = 350;
+
+AnimationEffect animationEffect = EFFECT_SCROLL;
+AnimationDirection animationDirection = DIRECTION_LEFT;
+ContentMode contentMode = MODE_TEXT;
+bool animationPaused = false;
 
 int textOffset = DISPLAY_WIDTH;
+int textOffsetY = TEXT_Y;
 int textWidth = 0;
+int wipeProgress = 0;
+bool blinkVisible = true;
 
-unsigned long lastScrollTime = 0;
+unsigned long lastAnimationTime = 0;
+unsigned long lastBlinkTime = 0;
 
 int brightness = 2;
 
+Color activeDrawingFrame[LED_COUNT];
+Color stagingDrawingFrame[LED_COUNT];
+bool stagingRowsReceived[DISPLAY_HEIGHT];
+bool receivingFrame = false;
+
+const char *getEffectName()
+{
+    switch (animationEffect)
+    {
+        case EFFECT_STILL:
+            return "STILL";
+        case EFFECT_WIPE:
+            return "WIPE";
+        case EFFECT_BLINK:
+            return "BLINK";
+        default:
+            return "SCROLL";
+    }
+}
+
+const char *getDirectionName()
+{
+    switch (animationDirection)
+    {
+        case DIRECTION_RIGHT:
+            return "RIGHT";
+        case DIRECTION_UP:
+            return "UP";
+        case DIRECTION_DOWN:
+            return "DOWN";
+        default:
+            return "LEFT";
+    }
+}
+
+const char *getContentModeName()
+{
+    return contentMode == MODE_DRAWING ? "DRAWING" : "TEXT";
+}
+
+unsigned long getAnimationInterval()
+{
+    return 1000UL / animationSpeed;
+}
+
+int getCenteredTextX()
+{
+    return (DISPLAY_WIDTH - textWidth) / 2;
+}
+
+int getLogicalIndex(int x, int y)
+{
+    return y * DISPLAY_WIDTH + x;
+}
+
+void clearDrawingFrame(Color frame[])
+{
+    for (int i = 0; i < LED_COUNT; i++)
+    {
+        frame[i] = BLACK;
+    }
+}
+
+void clearStagingRows()
+{
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        stagingRowsReceived[y] = false;
+    }
+}
+
+void displayActiveDrawingFrame()
+{
+    clearDisplay();
+
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        {
+            setPixel(x, y, activeDrawingFrame[getLogicalIndex(x, y)]);
+        }
+    }
+
+    showDisplay();
+}
+
+void drawDrawingFrame(int startX, int startY)
+{
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        {
+            setPixel(
+                startX + x,
+                startY + y,
+                activeDrawingFrame[getLogicalIndex(x, y)]
+            );
+        }
+    }
+}
+
+int getContentWidth()
+{
+    return contentMode == MODE_DRAWING ? DISPLAY_WIDTH : textWidth;
+}
+
+int getContentHeight()
+{
+    return contentMode == MODE_DRAWING ? DISPLAY_HEIGHT : FONT_HEIGHT;
+}
+
+int getCenteredContentX()
+{
+    return contentMode == MODE_DRAWING ? 0 : getCenteredTextX();
+}
+
+int getCenteredContentY()
+{
+    return contentMode == MODE_DRAWING ? 0 : TEXT_Y;
+}
+
+void drawActiveContent(int startX, int startY)
+{
+    if (contentMode == MODE_DRAWING)
+    {
+        drawDrawingFrame(startX, startY);
+    }
+    else
+    {
+        drawText(message, startX, startY, messageColor);
+    }
+}
+
+bool isHexCharacter(char character)
+{
+    return
+        (character >= '0' && character <= '9') ||
+        (character >= 'A' && character <= 'F');
+}
+
+int hexValue(char character)
+{
+    if (character >= '0' && character <= '9')
+    {
+        return character - '0';
+    }
+
+    return character - 'A' + 10;
+}
+
+Color parseHexColor(const char hex[])
+{
+    return {
+        hexValue(hex[0]) * 16 + hexValue(hex[1]),
+        hexValue(hex[2]) * 16 + hexValue(hex[3]),
+        hexValue(hex[4]) * 16 + hexValue(hex[5])
+    };
+}
+
+void beginFrameTransfer(const char dimensions[])
+{
+    if (strcmp(dimensions, "32X8") != 0)
+    {
+        Serial.println("FRAME:ERROR:DIMENSIONS");
+        receivingFrame = false;
+        return;
+    }
+
+    clearDrawingFrame(stagingDrawingFrame);
+    clearStagingRows();
+    receivingFrame = true;
+    Serial.println("FRAME:READY");
+}
+
+void storeFrameRow(const char command[])
+{
+    if (!receivingFrame)
+    {
+        Serial.println("ROW:ERROR:NO_FRAME");
+        return;
+    }
+
+    const char *rowText = command + 4;
+    const char *separator = strchr(rowText, ':');
+
+    if (separator == nullptr || separator == rowText)
+    {
+        Serial.println("ROW:ERROR:FORMAT");
+        return;
+    }
+
+    for (const char *character = rowText; character < separator; character++)
+    {
+        if (*character < '0' || *character > '9')
+        {
+            Serial.println("ROW:ERROR:INDEX");
+            return;
+        }
+    }
+
+    int row = atoi(rowText);
+
+    if (row < 0 || row >= DISPLAY_HEIGHT)
+    {
+        Serial.println("ROW:ERROR:INDEX");
+        return;
+    }
+
+    const char *hex = separator + 1;
+
+    if (strlen(hex) != FRAME_ROW_HEX_LENGTH)
+    {
+        Serial.println("ROW:ERROR:LENGTH");
+        return;
+    }
+
+    for (int i = 0; i < FRAME_ROW_HEX_LENGTH; i++)
+    {
+        if (!isHexCharacter(hex[i]))
+        {
+            Serial.println("ROW:ERROR:HEX");
+            return;
+        }
+    }
+
+    for (int x = 0; x < DISPLAY_WIDTH; x++)
+    {
+        stagingDrawingFrame[getLogicalIndex(x, row)] =
+            parseHexColor(hex + x * 6);
+    }
+
+    stagingRowsReceived[row] = true;
+
+    Serial.print("ROW:");
+    Serial.print(row);
+    Serial.println(":OK");
+}
+
+void endFrameTransfer()
+{
+    if (!receivingFrame)
+    {
+        Serial.println("FRAME:ERROR:NO_FRAME");
+        return;
+    }
+
+    for (int row = 0; row < DISPLAY_HEIGHT; row++)
+    {
+        if (!stagingRowsReceived[row])
+        {
+            Serial.println("FRAME:ERROR:INCOMPLETE");
+            return;
+        }
+    }
+
+    for (int i = 0; i < LED_COUNT; i++)
+    {
+        activeDrawingFrame[i] = stagingDrawingFrame[i];
+    }
+
+    receivingFrame = false;
+    Serial.println("FRAME:STORED");
+}
+
+bool setContentMode(const char value[])
+{
+    if (strcmp(value, "TEXT") == 0)
+    {
+        contentMode = MODE_TEXT;
+        resetAnimation();
+        Serial.println("MODE:TEXT");
+        return true;
+    }
+
+    if (strcmp(value, "DRAWING") == 0)
+    {
+        contentMode = MODE_DRAWING;
+        resetAnimation();
+        Serial.println("MODE:DRAWING");
+        return true;
+    }
+
+    return false;
+}
+
+void maskWipeFrame()
+{
+    int limit;
+
+    if (animationDirection == DIRECTION_LEFT)
+    {
+        limit = constrain(wipeProgress, 0, DISPLAY_WIDTH);
+
+        for (int y = 0; y < DISPLAY_HEIGHT; y++)
+        {
+            for (int x = limit; x < DISPLAY_WIDTH; x++)
+            {
+                setPixel(x, y, BLACK);
+            }
+        }
+    }
+    else if (animationDirection == DIRECTION_RIGHT)
+    {
+        limit = constrain(wipeProgress, 0, DISPLAY_WIDTH);
+
+        for (int y = 0; y < DISPLAY_HEIGHT; y++)
+        {
+            for (int x = 0; x < DISPLAY_WIDTH - limit; x++)
+            {
+                setPixel(x, y, BLACK);
+            }
+        }
+    }
+    else if (animationDirection == DIRECTION_UP)
+    {
+        limit = constrain(wipeProgress, 0, DISPLAY_HEIGHT);
+
+        for (int y = limit; y < DISPLAY_HEIGHT; y++)
+        {
+            for (int x = 0; x < DISPLAY_WIDTH; x++)
+            {
+                setPixel(x, y, BLACK);
+            }
+        }
+    }
+    else
+    {
+        limit = constrain(wipeProgress, 0, DISPLAY_HEIGHT);
+
+        for (int y = 0; y < DISPLAY_HEIGHT - limit; y++)
+        {
+            for (int x = 0; x < DISPLAY_WIDTH; x++)
+            {
+                setPixel(x, y, BLACK);
+            }
+        }
+    }
+}
+
+void renderAnimationFrame()
+{
+    clearDisplay();
+
+    if (animationEffect == EFFECT_SCROLL)
+    {
+        drawActiveContent(textOffset, textOffsetY);
+    }
+    else if (animationEffect == EFFECT_BLINK)
+    {
+        if (blinkVisible)
+        {
+            drawActiveContent(
+                getCenteredContentX(),
+                getCenteredContentY()
+            );
+        }
+    }
+    else
+    {
+        drawActiveContent(
+            getCenteredContentX(),
+            getCenteredContentY()
+        );
+
+        if (animationEffect == EFFECT_WIPE)
+        {
+            maskWipeFrame();
+        }
+    }
+
+    showDisplay();
+}
+
+void resetAnimation()
+{
+    textWidth = getTextWidth(message);
+    int contentWidth = getContentWidth();
+    int contentHeight = getContentHeight();
+
+    wipeProgress = 0;
+    blinkVisible = true;
+
+    if (animationDirection == DIRECTION_LEFT)
+    {
+        textOffset = DISPLAY_WIDTH;
+        textOffsetY = getCenteredContentY();
+    }
+    else if (animationDirection == DIRECTION_RIGHT)
+    {
+        textOffset = -contentWidth;
+        textOffsetY = getCenteredContentY();
+    }
+    else if (animationDirection == DIRECTION_UP)
+    {
+        textOffset = getCenteredContentX();
+        textOffsetY = DISPLAY_HEIGHT;
+    }
+    else
+    {
+        textOffset = getCenteredContentX();
+        textOffsetY = -contentHeight;
+    }
+
+    lastAnimationTime = millis();
+    lastBlinkTime = lastAnimationTime;
+    renderAnimationFrame();
+}
+
 void printStatus()
 {
-    Serial.print("STATUS:MESSAGE=");
+    Serial.print("STATUS:MATRIX=");
+    Serial.print(DISPLAY_WIDTH);
+    Serial.print("x");
+    Serial.print(DISPLAY_HEIGHT);
+
+    Serial.print(";MESSAGE=");
     Serial.print(message);
 
+    Serial.print(";EFFECT=");
+    Serial.print(getEffectName());
+
+    Serial.print(";DIRECTION=");
+    Serial.print(getDirectionName());
+
+    Serial.print(";MODE=");
+    Serial.print(getContentModeName());
+
     Serial.print(";SPEED=");
-    Serial.print(scrollInterval);
+    Serial.print(animationSpeed);
+
+    Serial.print(";BLINK_ON=");
+    Serial.print(blinkOnMs);
+
+    Serial.print(";BLINK_OFF=");
+    Serial.print(blinkOffMs);
+
+    Serial.print(";PAUSED=");
+    Serial.print(animationPaused ? 1 : 0);
 
     Serial.print(";COLOR=");
     Serial.print(messageColor.red);
@@ -891,50 +1358,197 @@ void printHelp()
 {
     Serial.println("Available commands:");
     Serial.println("MESSAGE:<text>");
-    Serial.println("SPEED:<milliseconds>");
+    Serial.println("MODE:TEXT|DRAWING");
+    Serial.println("EFFECT:STILL|SCROLL|WIPE|BLINK");
+    Serial.println("DIRECTION:LEFT|RIGHT|UP|DOWN");
+    Serial.println("SPEED:<pixels per second, 1-30>");
+    Serial.println("BLINK_ON:<milliseconds>");
+    Serial.println("BLINK_OFF:<milliseconds>");
+    Serial.println("PAUSED:0|1");
     Serial.println("COLOR:<red>,<green>,<blue>");
     Serial.println("BRIGHTNESS:<0-255>");
+    Serial.println("FRAME_BEGIN:32x8");
+    Serial.println("ROW:<0-7>:<192 hex characters>");
+    Serial.println("FRAME_END");
+    Serial.println("RESET");
     Serial.println("STATUS");
     Serial.println("HELP");
 }
 
-void updateMarquee()
+void advanceScroll()
 {
-    unsigned long currentTime = millis();
+    int contentWidth = getContentWidth();
+    int contentHeight = getContentHeight();
 
-    if (currentTime - lastScrollTime >= scrollInterval)
+    if (animationDirection == DIRECTION_LEFT)
     {
-        lastScrollTime = currentTime;
-
-        clearDisplay();
-
-        drawText(
-            message,
-            textOffset,
-            TEXT_Y,
-            messageColor
-        );
-
-        showDisplay();
-
         textOffset--;
 
-        if (textOffset < -textWidth)
+        if (textOffset < -contentWidth)
         {
             textOffset = DISPLAY_WIDTH;
         }
     }
+    else if (animationDirection == DIRECTION_RIGHT)
+    {
+        textOffset++;
+
+        if (textOffset > DISPLAY_WIDTH)
+        {
+            textOffset = -contentWidth;
+        }
+    }
+    else if (animationDirection == DIRECTION_UP)
+    {
+        textOffsetY--;
+
+        if (textOffsetY < -contentHeight)
+        {
+            textOffsetY = DISPLAY_HEIGHT;
+        }
+    }
+    else
+    {
+        textOffsetY++;
+
+        if (textOffsetY > DISPLAY_HEIGHT)
+        {
+            textOffsetY = -contentHeight;
+        }
+    }
+}
+
+void advanceWipe()
+{
+    wipeProgress++;
+
+    int resetLimit =
+        animationDirection == DIRECTION_LEFT ||
+        animationDirection == DIRECTION_RIGHT
+            ? DISPLAY_WIDTH + 8
+            : DISPLAY_HEIGHT + 6;
+
+    if (wipeProgress > resetLimit)
+    {
+        wipeProgress = 0;
+    }
+}
+
+void updateAnimation()
+{
+    if (animationPaused ||
+        animationEffect == EFFECT_STILL)
+    {
+        return;
+    }
+
+    unsigned long currentTime = millis();
+
+    if (animationEffect == EFFECT_BLINK)
+    {
+        unsigned long blinkDuration = blinkVisible ? blinkOnMs : blinkOffMs;
+
+        if (currentTime - lastBlinkTime >= blinkDuration)
+        {
+            lastBlinkTime = currentTime;
+            blinkVisible = !blinkVisible;
+            renderAnimationFrame();
+        }
+
+        return;
+    }
+
+    unsigned long interval = getAnimationInterval();
+
+    if (currentTime - lastAnimationTime < interval)
+    {
+        return;
+    }
+
+    // Advance the schedule by the intended interval so loop overhead does not
+    // slowly make the physical board drift behind the browser preview.
+    lastAnimationTime += interval;
+
+    if (currentTime - lastAnimationTime > interval * 4)
+    {
+        lastAnimationTime = currentTime;
+    }
+
+    if (animationEffect == EFFECT_WIPE)
+    {
+        advanceWipe();
+    }
+    else
+    {
+        advanceScroll();
+    }
+
+    renderAnimationFrame();
 }
 
 void setMarqueeMessage(const char newMessage[])
 {
-    strcpy(message, newMessage);
-
-    textWidth = getTextWidth(message);
-    textOffset = DISPLAY_WIDTH;
+    strncpy(message, newMessage, MESSAGE_BUFFER_SIZE - 1);
+    message[MESSAGE_BUFFER_SIZE - 1] = '\0';
+    contentMode = MODE_TEXT;
+    resetAnimation();
 
     Serial.print("New message: ");
     Serial.println(message);
+}
+
+bool setAnimationEffect(const char value[])
+{
+    if (strcmp(value, "STILL") == 0)
+    {
+        animationEffect = EFFECT_STILL;
+    }
+    else if (strcmp(value, "SCROLL") == 0)
+    {
+        animationEffect = EFFECT_SCROLL;
+    }
+    else if (strcmp(value, "WIPE") == 0)
+    {
+        animationEffect = EFFECT_WIPE;
+    }
+    else if (strcmp(value, "BLINK") == 0)
+    {
+        animationEffect = EFFECT_BLINK;
+    }
+    else
+    {
+        return false;
+    }
+
+    resetAnimation();
+    return true;
+}
+
+bool setAnimationDirection(const char value[])
+{
+    if (strcmp(value, "LEFT") == 0)
+    {
+        animationDirection = DIRECTION_LEFT;
+    }
+    else if (strcmp(value, "RIGHT") == 0)
+    {
+        animationDirection = DIRECTION_RIGHT;
+    }
+    else if (strcmp(value, "UP") == 0)
+    {
+        animationDirection = DIRECTION_UP;
+    }
+    else if (strcmp(value, "DOWN") == 0)
+    {
+        animationDirection = DIRECTION_DOWN;
+    }
+    else
+    {
+        return false;
+    }
+
+    resetAnimation();
+    return true;
 }
 
 void processCommand(const char command[])
@@ -943,16 +1557,99 @@ void processCommand(const char command[])
     {
         setMarqueeMessage(command + 8);
     }
+    else if (strncmp(command, "EFFECT:", 7) == 0)
+    {
+        if (!setAnimationEffect(command + 7))
+        {
+            Serial.println("Use EFFECT:STILL|SCROLL|WIPE|BLINK");
+        }
+    }
+    else if (strncmp(command, "DIRECTION:", 10) == 0)
+    {
+        if (!setAnimationDirection(command + 10))
+        {
+            Serial.println("Use DIRECTION:LEFT|RIGHT|UP|DOWN");
+        }
+    }
+    else if (strncmp(command, "MODE:", 5) == 0)
+    {
+        if (!setContentMode(command + 5))
+        {
+            Serial.println("Use MODE:TEXT|DRAWING");
+        }
+    }
+    else if (strncmp(command, "FRAME_BEGIN:", 12) == 0)
+    {
+        beginFrameTransfer(command + 12);
+    }
+    else if (strncmp(command, "ROW:", 4) == 0)
+    {
+        storeFrameRow(command);
+    }
+    else if (strcmp(command, "FRAME_END") == 0)
+    {
+        endFrameTransfer();
+    }
     else if (strncmp(command, "SPEED:", 6) == 0)
     {
         int newSpeed = atoi(command + 6);
 
-        if (newSpeed > 0)
+        if (newSpeed >= 1 && newSpeed <= 30)
         {
-            scrollInterval = newSpeed;
+            animationSpeed = newSpeed;
+            resetAnimation();
 
             Serial.print("New speed: ");
-            Serial.println(scrollInterval);
+            Serial.print(animationSpeed);
+            Serial.println(" pixels per second");
+        }
+        else
+        {
+            Serial.println("Speed must be 1-30 pixels per second.");
+        }
+    }
+    else if (strncmp(command, "BLINK_ON:", 9) == 0)
+    {
+        unsigned long newDuration = strtoul(command + 9, nullptr, 10);
+
+        if (newDuration >= 100 && newDuration <= 1200)
+        {
+            blinkOnMs = newDuration;
+            lastBlinkTime = millis();
+        }
+        else
+        {
+            Serial.println("Blink-on duration must be 100-1200 milliseconds.");
+        }
+    }
+    else if (strncmp(command, "BLINK_OFF:", 10) == 0)
+    {
+        unsigned long newDuration = strtoul(command + 10, nullptr, 10);
+
+        if (newDuration >= 100 && newDuration <= 1200)
+        {
+            blinkOffMs = newDuration;
+            lastBlinkTime = millis();
+        }
+        else
+        {
+            Serial.println("Blink-off duration must be 100-1200 milliseconds.");
+        }
+    }
+    else if (strncmp(command, "PAUSED:", 7) == 0)
+    {
+        if (strcmp(command + 7, "1") == 0)
+        {
+            animationPaused = true;
+        }
+        else if (strcmp(command + 7, "0") == 0)
+        {
+            animationPaused = false;
+            resetAnimation();
+        }
+        else
+        {
+            Serial.println("Use PAUSED:0 or PAUSED:1");
         }
     }
     else if (strncmp(command, "COLOR:", 6) == 0)
@@ -975,6 +1672,8 @@ void processCommand(const char command[])
                 Serial.print(green);
                 Serial.print(", ");
                 Serial.println(blue);
+
+                renderAnimationFrame();
             }
             else
             {
@@ -994,6 +1693,7 @@ void processCommand(const char command[])
         {
             brightness = newBrightness;
             FastLED.setBrightness(brightness);
+            showDisplay();
 
             Serial.print("New brightness: ");
             Serial.println(brightness);
@@ -1006,6 +1706,11 @@ void processCommand(const char command[])
     else if (strcmp(command, "STATUS") == 0)
     {
         printStatus();
+    }
+    else if (strcmp(command, "RESET") == 0)
+    {
+        resetAnimation();
+        Serial.println("Animation reset.");
     }
     else if (strcmp(command, "HELP") == 0)
     {
@@ -1039,13 +1744,10 @@ void checkSerialInput()
             {
                 inputIndex--;
 
-                Serial.print("\b \b");
             }
 
             continue;
         }
-
-        Serial.print(incomingCharacter);
 
         if (incomingCharacter == '\n')
         {
@@ -1058,7 +1760,7 @@ void checkSerialInput()
 
             inputIndex = 0;
         }
-        else if (inputIndex < MESSAGE_BUFFER_SIZE - 1)
+        else if (inputIndex < COMMAND_BUFFER_SIZE - 1)
         {
             inputBuffer[inputIndex] = incomingCharacter;
             inputIndex++;
@@ -1159,16 +1861,20 @@ void setup()
 
     FastLED.setBrightness(brightness);
 
+    clearDrawingFrame(activeDrawingFrame);
+    clearDrawingFrame(stagingDrawingFrame);
+    clearStagingRows();
+
     clearDisplay();
     showDisplay();
 
-    textWidth = getTextWidth(message);
+    resetAnimation();
 
-    Serial.println("Enter a marquee message:");
+    Serial.println("PIXEL BOARD FIRMWARE V2");
 }
 
 void loop()
 {
     checkSerialInput();
-    updateMarquee();
+    updateAnimation();
 }

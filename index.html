@@ -599,6 +599,9 @@
               <div class="field" id="textControls">
                 <label for="msg">Message</label>
                 <input id="msg" type="text" value="THIS SPACE INTENTIONALLY LEFT BLANK" />
+                <div class="btnrow" style="margin-top:10px">
+                  <button id="publishTextBtn" type="button">Display on Pixel Board</button>
+                </div>
                 <div class="help">Letters, numbers, spaces, and selected punctuation are supported.</div>
               </div>
 
@@ -607,6 +610,7 @@
                 <div class="btnrow">
                   <button class="tag on" id="brushLightPanel" type="button" aria-pressed="true">Brush</button>
                   <button class="tag" id="brushErasePanel" type="button" aria-pressed="false">Erase</button>
+                  <button id="sendFramePanel" type="button" disabled>Display on Pixel Board</button>
                   <button id="copyFramePanel" type="button">Copy frame</button>
                   <button id="loadFramePanel" type="button">Load frame</button>
                 </div>
@@ -646,12 +650,12 @@
               <div class="two" style="margin-top:12px">
                 <div id="speedField">
                   <label for="speed">Speed</label>
-                  <input id="speed" type="range" min="10" max="200" value="40" />
-                  <div class="mini"><span id="speedVal">40</span> ms per tick</div>
+                  <input id="speed" type="range" min="1" max="30" value="10" />
+                  <div class="mini"><span id="speedVal">10</span> pixels per second</div>
                 </div>
                 <div>
                   <label for="bright">Board brightness</label>
-                  <input id="bright" type="range" min="0.2" max="1" step="0.05" value="0.95" />
+                  <input id="bright" type="range" min="0" max="1" step="0.01" value="0.95" />
                   <div class="mini"><span id="brightVal">0.95</span></div>
                 </div>
               </div>
@@ -721,8 +725,11 @@
        Constants and font
        ========================================================= */
 
-    const STORAGE_KEY = "pixel-board-state-v3";
-    const FRAME_FORMAT_VERSION = 1;
+    const STORAGE_KEY = "pixel-board-state-v5";
+    const LEGACY_STORAGE_KEY = "pixel-board-state-v3";
+    const LEGACY_COLOR_STORAGE_KEY = "pixel-board-state-v4";
+    const FRAME_FORMAT_VERSION = 2;
+    const LEGACY_FRAME_FORMAT_VERSION = 1;
     const PIXEL_OFF = false;
     const PIXEL_ON = true;
 
@@ -785,6 +792,26 @@
     const glyphFor = (character) =>
       FONT_5X7[character] ?? FONT_5X7["?"];
 
+    function normalizePixelColor(value, fallbackColor = state.color) {
+      if (value === PIXEL_OFF || value === null || value === undefined) {
+        return PIXEL_OFF;
+      }
+
+      if (value === PIXEL_ON) {
+        return fallbackColor.toUpperCase();
+      }
+
+      if (typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value)) {
+        return value.toUpperCase();
+      }
+
+      return PIXEL_OFF;
+    }
+
+    function isPixelOn(value) {
+      return value !== PIXEL_OFF && value !== null && value !== undefined;
+    }
+
     /* =========================================================
        Display model
        ========================================================= */
@@ -818,7 +845,7 @@
         return;
       }
 
-      display.pixels[y][x] = Boolean(value);
+      display.pixels[y][x] = value;
       renderNeeded = true;
     }
 
@@ -870,7 +897,8 @@
         const columns = Math.min(display.width, sourcePixels[y].length);
 
         for (let x = 0; x < columns; x += 1) {
-          display.pixels[y][x] = Boolean(sourcePixels[y][x]);
+          display.pixels[y][x] =
+            normalizePixelColor(sourcePixels[y][x]);
         }
       }
 
@@ -1038,7 +1066,7 @@
       const width = elements.canvas.width;
       const height = elements.canvas.height;
 
-      const color = hexToRgb(state.color);
+      const color = hexToRgb(getActiveColor());
 
       context.clearRect(0, 0, width, height);
       context.fillStyle = "#090b10";
@@ -1049,11 +1077,14 @@
           const drawX = state.previewGap + x * pitch;
           const drawY = state.previewGap + y * pitch;
           const radius = Math.max(1, Math.floor(state.previewDotSize / 4));
-          const isOn = getPixel(display, x, y);
+          const pixel = getPixel(display, x, y);
 
-          if (isOn) {
+          if (isPixelOn(pixel)) {
+            const pixelColor =
+              typeof pixel === "string" ? hexToRgb(pixel) : color;
+
             context.fillStyle =
-  `rgba(${color.red}, ${color.green}, ${color.blue}, ${state.brightness})`;
+  `rgba(${pixelColor.red}, ${pixelColor.green}, ${pixelColor.blue}, ${state.brightness})`;
             roundRect(
               context,
               drawX,
@@ -1065,7 +1096,7 @@
             context.fill();
 
             context.fillStyle =
-  `rgba(${color.red}, ${color.green}, ${color.blue}, ${state.brightness * 0.15})`;
+  `rgba(${pixelColor.red}, ${pixelColor.green}, ${pixelColor.blue}, ${state.brightness * 0.15})`;
             roundRect(
               context,
               drawX - 1,
@@ -1121,7 +1152,10 @@
         throw new Error("The data is not a frame.");
       }
 
-      if (Number(payload.version) !== FRAME_FORMAT_VERSION) {
+      if (
+        Number(payload.version) !== FRAME_FORMAT_VERSION &&
+        Number(payload.version) !== LEGACY_FRAME_FORMAT_VERSION
+      ) {
         throw new Error("This frame version is not supported.");
       }
 
@@ -1141,6 +1175,32 @@
         height,
         pixels: payload.pixels
       };
+    }
+
+    function pixelToFrameHex(pixel) {
+      const color = normalizePixelColor(pixel);
+
+      if (!color) {
+        return "000000";
+      }
+
+      return color.slice(1).toUpperCase();
+    }
+
+    function createFrameRows(source) {
+      const rows = [];
+
+      for (let y = 0; y < source.height; y += 1) {
+        let row = "";
+
+        for (let x = 0; x < source.width; x += 1) {
+          row += pixelToFrameHex(source.pixels[y][x]);
+        }
+
+        rows.push(row);
+      }
+
+      return rows;
     }
 
     function hexToRgb(hex) {
@@ -1188,6 +1248,7 @@ function updateContentAccent(hex) {
       playPause: document.getElementById("playPause"),
       resetAnimationBtn: document.getElementById("resetAnimationBtn"),
       clearBtn: document.getElementById("clearBtn"),
+      publishTextBtn: document.getElementById("publishTextBtn"),
       fullscreenBtn: document.getElementById("fullscreenBtn"),
       toggleControlsBtn: document.getElementById("toggleControlsBtn"),
       controlsWrap: document.getElementById("controlsWrap"),
@@ -1218,6 +1279,7 @@ function updateContentAccent(hex) {
       blinkOffVal: document.getElementById("blinkOffVal"),
       brushLightPanel: document.getElementById("brushLightPanel"),
       brushErasePanel: document.getElementById("brushErasePanel"),
+      sendFramePanel: document.getElementById("sendFramePanel"),
       copyFramePanel: document.getElementById("copyFramePanel"),
       loadFramePanel: document.getElementById("loadFramePanel"),
       status: document.getElementById("status")
@@ -1228,9 +1290,11 @@ function updateContentAccent(hex) {
       contentType: "text",
       effect: "scroll",
       direction: "left",
-      speed: 40,
+      speed: 10,
       brightness: 0.95,
       color: "#00ff8c",
+      textColor: "#00ff8c",
+      drawingColor: "#00ff8c",
       paused: false,
       blinkOnMs: 450,
       blinkOffMs: 350,
@@ -1258,6 +1322,16 @@ function updateContentAccent(hex) {
     let serialPort = null;
     let serialReader = null;
     let serialReceiveBuffer = "";
+    let connectedMatrixSize = null;
+    let hasReceivedStatus = false;
+    let statusSyncRequestId = 0;
+    let drawingDirty = false;
+    let drawingDisplayDirty = false;
+    let displayedContentType = null;
+    let textDirty = false;
+    let textEditing = true;
+    let drawingEditing = true;
+    let drawingSyncedToBoard = false;
 
     function rgbToHex(red, green, blue) {
   return "#" +
@@ -1270,14 +1344,140 @@ function updateContentAccent(hex) {
       .join("");
 }
 
+    const delay = (milliseconds) =>
+      new Promise(resolve => {
+        window.setTimeout(resolve, milliseconds);
+      });
+
+    function hardwareBrightnessToUi(hardwareBrightness) {
+      return clamp(Number(hardwareBrightness) / 255, 0, 1);
+    }
+
+    function uiBrightnessToHardware(uiBrightness) {
+      return clamp(Math.round(Number(uiBrightness) * 255), 0, 255);
+    }
+
+    function getActiveColor() {
+      return state.contentType === "drawing"
+        ? state.drawingColor
+        : state.textColor;
+    }
+
+    function setActiveColor(color) {
+      if (state.contentType === "drawing") {
+        state.drawingColor = color;
+      } else {
+        state.textColor = color;
+        state.color = color;
+      }
+    }
+
+    function normalizeStateColor(value, fallback = "#00FF8C") {
+      const color = normalizePixelColor(value, fallback);
+
+      return color || fallback;
+    }
+
+    function isCurrentDraftDirty() {
+      return state.contentType === "drawing"
+        ? drawingDirty || drawingDisplayDirty
+        : textDirty;
+    }
+
+    function isCurrentEditing() {
+      return state.contentType === "drawing"
+        ? drawingEditing
+        : textEditing;
+    }
+
+    function isCurrentLive() {
+      if (displayedContentType !== state.contentType) {
+        return false;
+      }
+
+      if (state.contentType === "drawing" && !drawingSyncedToBoard) {
+        return false;
+      }
+
+      return !isCurrentEditing() && !isCurrentDraftDirty();
+    }
+
+    function getWorkflowStatus() {
+      const editor =
+        state.contentType === "drawing" ? "Drawing" : "Text";
+      const board =
+        displayedContentType === "drawing"
+          ? "Drawing"
+          : (displayedContentType === "text" ? "Text" : "Unknown");
+
+      if (isCurrentLive()) {
+        return `Live ${editor} · Pixel Board up to date`;
+      }
+
+      return `Editing ${editor} · Pixel Board displaying ${board}`;
+    }
+
+    function markTextDirty() {
+      textDirty = true;
+      textEditing = true;
+      syncUI();
+    }
+
+    function markDrawingDirty() {
+      drawingDirty = true;
+      drawingSyncedToBoard = false;
+      drawingEditing = true;
+      syncUI();
+    }
+
+    function markDrawingDisplayDirty() {
+      if (state.contentType !== "drawing") {
+        return;
+      }
+
+      drawingDisplayDirty = true;
+      drawingEditing = true;
+      syncUI();
+    }
+
+    function handleDisplaySettingChanged(command) {
+      if (state.contentType !== "drawing") {
+        if (serialPort?.writable) {
+          sendSerialCommand(command);
+        }
+
+        return;
+      }
+
+      if (serialPort?.writable && displayedContentType === "drawing") {
+        sendSerialCommand(command);
+      }
+
+      if (drawingDirty || displayedContentType !== "drawing") {
+        markDrawingDisplayDirty();
+      } else {
+        drawingDisplayDirty = false;
+        syncUI();
+      }
+    }
+
     /* =========================================================
        Persistence
        ========================================================= */
 
     function saveApplicationState() {
       const saved = {
-        version: 3,
+        version: 5,
         state,
+        publication: {
+          displayedContentType,
+          textDirty,
+          drawingDirty,
+          drawingDisplayDirty,
+          textEditing,
+          drawingEditing,
+          drawingSyncedToBoard
+        },
         display: {
           width: display.width,
           height: display.height
@@ -1290,7 +1490,10 @@ function updateContentAccent(hex) {
 
     function loadApplicationState() {
       try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        const raw =
+          localStorage.getItem(STORAGE_KEY) ??
+          localStorage.getItem(LEGACY_COLOR_STORAGE_KEY) ??
+          localStorage.getItem(LEGACY_STORAGE_KEY);
 
         if (!raw) {
           return;
@@ -1298,14 +1501,50 @@ function updateContentAccent(hex) {
 
         const saved = JSON.parse(raw);
 
-        if (saved?.version !== 3) {
+        if (
+          saved?.version !== 3 &&
+          saved?.version !== 4 &&
+          saved?.version !== 5
+        ) {
           return;
+        }
+
+        const restoredState = {
+          ...saved.state
+        };
+
+        // Version 3 stored milliseconds per tick. Version 4 stores
+        // logical pixels per second so the preview and hardware agree.
+        if (saved.version === 3) {
+          const legacyInterval = Number(restoredState.speed);
+          restoredState.speed = Number.isFinite(legacyInterval) && legacyInterval > 0
+            ? clamp(Math.round(1000 / legacyInterval), 1, 30)
+            : 10;
         }
 
         state = {
           ...state,
-          ...saved.state
+          ...restoredState
         };
+
+        state.textColor =
+          normalizeStateColor(state.textColor || state.color);
+        state.drawingColor =
+          normalizeStateColor(state.drawingColor || state.color);
+        state.color = getActiveColor();
+
+        if (saved.publication) {
+          displayedContentType =
+            saved.publication.displayedContentType || displayedContentType;
+          textDirty = Boolean(saved.publication.textDirty);
+          drawingDirty = Boolean(saved.publication.drawingDirty);
+          drawingDisplayDirty =
+            Boolean(saved.publication.drawingDisplayDirty);
+          textEditing = saved.publication.textEditing !== false;
+          drawingEditing = saved.publication.drawingEditing !== false;
+          drawingSyncedToBoard =
+            Boolean(saved.publication.drawingSyncedToBoard);
+        }
 
         const width = clamp(Number(saved.display?.width ?? 64), 8, 256);
         const height = clamp(Number(saved.display?.height ?? 16), 8, 64);
@@ -1330,7 +1569,7 @@ function updateContentAccent(hex) {
 
       window.clearTimeout(setStatus.timeoutId);
       setStatus.timeoutId = window.setTimeout(() => {
-        elements.status.textContent = "";
+        elements.status.textContent = getWorkflowStatus();
       }, 2500);
     }
 
@@ -1355,8 +1594,8 @@ function updateContentAccent(hex) {
       elements.dir.value = state.direction;
       elements.speed.value = String(state.speed);
       elements.bright.value = String(state.brightness);
-      elements.color.value = state.color;
-      updateContentAccent(state.color);
+      elements.color.value = getActiveColor();
+      updateContentAccent(getActiveColor());
       elements.mw.value = String(display.width);
       elements.mh.value = String(display.height);
       elements.dot.value = String(state.previewDotSize);
@@ -1379,13 +1618,15 @@ function updateContentAccent(hex) {
       );
 
       const isDrawing = state.contentType === "drawing";
-      const canEditDrawing = isDrawing && state.paused;
+      const isLive = isCurrentLive();
+      const isEditing = !isLive;
+      const canEditDrawing = isDrawing && isEditing;
       const usesDirection =
-        state.effect === "scroll" || state.effect === "wipe";
+        isLive &&
+        (state.effect === "scroll" || state.effect === "wipe");
       const usesSpeed =
-        state.effect === "scroll" ||
-        state.effect === "wipe" ||
-        state.effect === "blink";
+        isLive &&
+        (state.effect === "scroll" || state.effect === "wipe");
 
       elements.clearBtn.textContent =
         isDrawing ? "Clear drawing" : "Clear message";
@@ -1393,19 +1634,63 @@ function updateContentAccent(hex) {
       // Content-specific controls
       elements.textControls.hidden = isDrawing;
       elements.drawingControls.hidden = !isDrawing;
+      elements.msg.disabled = isDrawing || !isEditing;
+      elements.color.disabled = !isEditing;
+      elements.clearBtn.disabled = !isEditing;
+      elements.brushLightPanel.disabled = !canEditDrawing;
+      elements.brushErasePanel.disabled = !canEditDrawing;
+      elements.copyFramePanel.disabled = isDrawing && !isEditing;
+      elements.loadFramePanel.disabled = !canEditDrawing;
 
       // Effect-specific controls
       elements.directionField.hidden = !usesDirection;
       elements.speedField.hidden = !usesSpeed;
-      elements.blinkRow.hidden = state.effect !== "blink";
+      elements.blinkRow.hidden = !isLive || state.effect !== "blink";
 
       elements.dir.disabled = !usesDirection;
       elements.speed.disabled = !usesSpeed;
-      elements.resetAnimationBtn.disabled = state.effect === "still";
+      elements.effect.disabled = !isLive;
+      elements.playPause.disabled = !isLive;
+      elements.resetAnimationBtn.disabled =
+        !isLive || state.effect === "still";
+
+      elements.publishTextBtn.textContent =
+        isLive
+          ? "Edit Message"
+          : (
+              displayedContentType === "text"
+                ? "Update Pixel Board"
+                : "Display on Pixel Board"
+            );
+      elements.publishTextBtn.disabled =
+        !isDrawing && !serialPort?.writable && !isLive;
+
+      elements.sendFramePanel.disabled =
+        isLive
+          ? false
+          : (
+              !serialPort?.writable ||
+              (!drawingDirty && !drawingDisplayDirty && !drawingEditing)
+            );
+      elements.sendFramePanel.textContent =
+        isLive
+          ? "Edit Drawing"
+          : (
+              displayedContentType === "drawing" && drawingSyncedToBoard
+                ? "Update Pixel Board"
+                : "Display on Pixel Board"
+            );
+
+      const matrixSizeLocked = connectedMatrixSize !== null;
+      elements.mw.disabled = matrixSizeLocked;
+      elements.mh.disabled = matrixSizeLocked;
+      document.querySelectorAll("[data-preset]").forEach((button) => {
+        button.disabled = matrixSizeLocked;
+      });
 
       const drawingHintText = canEditDrawing
-        ? "Drawing is editable while playback is paused."
-        : "Pause playback to edit the drawing.";
+        ? "Drawing edits stay in the browser until sent."
+        : "Live drawing controls are synced with the Pixel Board.";
 
       elements.drawingPanelHint.textContent = drawingHintText;
 
@@ -1424,6 +1709,8 @@ function updateContentAccent(hex) {
       elements.resolutionLabel.textContent =
         `${display.width} × ${display.height} logical pixels`;
 
+      elements.status.textContent = getWorkflowStatus();
+
       updateBezel();
     }
 
@@ -1433,6 +1720,7 @@ function updateContentAccent(hex) {
 
     function resetAnimation() {
       textBitmap = getContentBitmap();
+      lastTickAt = performance.now();
       animation.wipe = 0;
       animation.blinkVisible = true;
       animation.nextBlinkAt =
@@ -1456,7 +1744,9 @@ function updateContentAccent(hex) {
           Math.floor((display.width - textBitmap.columns) / 2);
       }
 
-      if (state.effect === "still" || state.effect === "blink") {
+      if (!isCurrentLive()) {
+        display = buildCenteredContentFrame();
+      } else if (state.effect === "still" || state.effect === "blink") {
         display = buildCenteredContentFrame();
       } else {
         clearDisplay(display);
@@ -1495,6 +1785,14 @@ function updateContentAccent(hex) {
       }
 
       return true;
+    }
+
+    function getAnimationIntervalMs(speed) {
+      const pixelsPerSecond = clamp(speed, 1, 30);
+
+      // The ESP32 schedules with whole milliseconds, so use the same rounded
+      // interval here to keep both renderers moving at the same actual rate.
+      return Math.floor(1000 / pixelsPerSecond);
     }
 
     function updateWipe() {
@@ -1582,20 +1880,30 @@ function updateContentAccent(hex) {
     }
 
     function updateAnimation(now) {
-      if (state.paused || state.effect === "still") {
+      if (
+        !isCurrentLive() ||
+        state.paused ||
+        state.effect === "still"
+      ) {
         return false;
       }
 
-      const interval = clamp(state.speed, 10, 200);
+      if (state.effect === "blink") {
+        return updateBlink(now);
+      }
+
+      const interval = getAnimationIntervalMs(state.speed);
 
       if (now - lastTickAt < interval) {
         return false;
       }
 
-      lastTickAt = now;
+      // Keep the clock aligned to the requested rate instead of adding
+      // browser rendering delay to every animation step.
+      lastTickAt += interval;
 
-      if (state.effect === "blink") {
-        return updateBlink(now);
+      if (now - lastTickAt > interval * 4) {
+        lastTickAt = now;
       }
 
       if (state.effect === "wipe") {
@@ -1672,21 +1980,28 @@ function updateContentAccent(hex) {
         return;
       }
 
+      const value =
+        state.doodleOn
+          ? normalizePixelColor(state.color)
+          : PIXEL_OFF;
+
       if (previousDoodleCell) {
         drawGridLine(
           drawing,
           previousDoodleCell,
           cell,
-          state.doodleOn
+          value
         );
       } else {
-        setPixel(drawing, cell.x, cell.y, state.doodleOn);
+        setPixel(drawing, cell.x, cell.y, value);
       }
 
       previousDoodleCell = cell;
       display = buildCenteredContentFrame();
       renderNeeded = true;
+      drawingDirty = true;
       saveApplicationState();
+      syncUI();
     }
 
     /* =========================================================
@@ -1705,15 +2020,12 @@ async function connectPixelBoard() {
     elements.connectBtn.disabled = true;
     elements.connectionDot.classList.add("connected");
     elements.getStatusBtn.disabled = false;
+    syncUI();
 
     setStatus("Connected to Pixel Board.");
 
     readSerial();
-await new Promise(resolve =>
-  setTimeout(resolve, 2000)
-);
-
-sendSerialCommand("STATUS");
+    syncStatusFromBoard();
 
   } catch (error) {
     console.error(error);
@@ -1722,10 +2034,33 @@ sendSerialCommand("STATUS");
   }
 }
 
+async function syncStatusFromBoard() {
+  const requestId = statusSyncRequestId + 1;
+  statusSyncRequestId = requestId;
+  hasReceivedStatus = false;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (
+      hasReceivedStatus ||
+      requestId !== statusSyncRequestId ||
+      !serialPort?.writable
+    ) {
+      return;
+    }
+
+    await sendSerialCommand("STATUS");
+    await delay(750);
+  }
+
+  if (!hasReceivedStatus && requestId === statusSyncRequestId) {
+    setStatus("Connected, but no board status was received.");
+  }
+}
+
 async function sendSerialCommand(command) {
   if (!serialPort?.writable) {
     setStatus("Pixel Board is not connected.");
-    return;
+    return false;
   }
 
   const writer = serialPort.writable.getWriter();
@@ -1736,9 +2071,122 @@ async function sendSerialCommand(command) {
     await writer.write(
       encoder.encode(command + "\n")
     );
+    return true;
+  } catch (error) {
+    console.error("Serial write error:", error);
+    setStatus("Could not write to Pixel Board.");
+    return false;
   } finally {
     writer.releaseLock();
   }
+}
+
+async function sendDrawingFrameToBoard() {
+  if (isCurrentLive()) {
+    drawingEditing = true;
+    resetAnimation();
+    syncUI();
+    saveApplicationState();
+    return;
+  }
+
+  if (!serialPort?.writable) {
+    setStatus("Pixel Board is not connected.");
+    syncUI();
+    return;
+  }
+
+  if (drawing.width !== 32 || drawing.height !== 8) {
+    setStatus("The Pixel Board drawing must be 32 x 8.");
+    return;
+  }
+
+  const rows = createFrameRows(drawing);
+  const commands = [
+    "FRAME_BEGIN:32x8",
+    ...rows.map((row, index) => `ROW:${index}:${row}`),
+    "FRAME_END",
+    `EFFECT:${state.effect}`,
+    `DIRECTION:${state.direction}`,
+    `SPEED:${state.speed}`,
+    `BLINK_ON:${state.blinkOnMs}`,
+    `BLINK_OFF:${state.blinkOffMs}`,
+    `PAUSED:${state.paused ? 1 : 0}`,
+    "MODE:DRAWING"
+  ];
+
+  elements.sendFramePanel.textContent = "Sending...";
+  elements.sendFramePanel.disabled = true;
+
+  for (const command of commands) {
+    const sent = await sendSerialCommand(command);
+
+    if (!sent) {
+      drawingDirty = true;
+      drawingEditing = true;
+      syncUI();
+      return;
+    }
+  }
+
+  drawingDirty = false;
+  drawingDisplayDirty = false;
+  displayedContentType = "drawing";
+  drawingEditing = false;
+  drawingSyncedToBoard = true;
+  syncUI();
+  saveApplicationState();
+  setStatus("Drawing sent to Pixel Board.");
+}
+
+async function publishTextToBoard() {
+  if (isCurrentLive()) {
+    textEditing = true;
+    resetAnimation();
+    syncUI();
+    saveApplicationState();
+    return;
+  }
+
+  if (!serialPort?.writable) {
+    setStatus("Pixel Board is not connected.");
+    syncUI();
+    return;
+  }
+
+  const color = hexToRgb(state.textColor);
+  const commands = [
+    `COLOR:${color.red},${color.green},${color.blue}`,
+    `MESSAGE:${state.text}`,
+    `EFFECT:${state.effect}`,
+    `DIRECTION:${state.direction}`,
+    `SPEED:${state.speed}`,
+    `BLINK_ON:${state.blinkOnMs}`,
+    `BLINK_OFF:${state.blinkOffMs}`,
+    `PAUSED:${state.paused ? 1 : 0}`,
+    "MODE:TEXT"
+  ];
+
+  elements.publishTextBtn.textContent = "Sending...";
+  elements.publishTextBtn.disabled = true;
+
+  for (const command of commands) {
+    const sent = await sendSerialCommand(command);
+
+    if (!sent) {
+      textDirty = true;
+      textEditing = true;
+      syncUI();
+      return;
+    }
+  }
+
+  textDirty = false;
+  textEditing = false;
+  displayedContentType = "text";
+  syncUI();
+  saveApplicationState();
+  setStatus("Text sent to Pixel Board.");
 }
 
 async function readSerial() {
@@ -1808,6 +2256,8 @@ function processSerialLine(line) {
     return;
   }
 
+  hasReceivedStatus = true;
+
   const statusText = line.substring(7);
 
   const parts = statusText.split(";");
@@ -1827,30 +2277,88 @@ function processSerialLine(line) {
     values[key] = value;
   }
 
-  if (values.MESSAGE !== undefined) {
-    state.text = values.MESSAGE;
+  const statusMode =
+    values.MODE?.toLowerCase() === "drawing" ? "drawing" : "text";
+  const preserveCurrentEditor = isCurrentEditing() && isCurrentDraftDirty();
+
+  displayedContentType = statusMode;
+
+  if (statusMode === "text" && !preserveCurrentEditor) {
+    state.contentType = "text";
   }
 
   if (values.SPEED !== undefined) {
-    state.speed = Number(values.SPEED);
+    state.speed = clamp(Number(values.SPEED), 1, 30);
+  }
+
+  if (values.EFFECT !== undefined) {
+    const effect = values.EFFECT.toLowerCase();
+
+    if (["still", "scroll", "wipe", "blink"].includes(effect)) {
+      state.effect = effect;
+    }
+  }
+
+  if (values.DIRECTION !== undefined) {
+    const direction = values.DIRECTION.toLowerCase();
+
+    if (["left", "right", "up", "down"].includes(direction)) {
+      state.direction = direction;
+    }
+  }
+
+  if (values.BLINK_ON !== undefined) {
+    state.blinkOnMs = clamp(Number(values.BLINK_ON), 100, 1200);
+  }
+
+  if (values.BLINK_OFF !== undefined) {
+    state.blinkOffMs = clamp(Number(values.BLINK_OFF), 100, 1200);
+  }
+
+  if (values.PAUSED !== undefined) {
+    state.paused = values.PAUSED === "1";
   }
 
   if (values.COLOR !== undefined) {
     const [red, green, blue] =
       values.COLOR.split(",").map(Number);
 
-    state.color = rgbToHex(red, green, blue);
+    if (statusMode === "text" && !textDirty) {
+      state.textColor = rgbToHex(red, green, blue);
+      state.color = state.textColor;
+    }
+  }
+
+  if (statusMode === "text" && values.MESSAGE !== undefined && !textDirty) {
+    state.text = values.MESSAGE;
+    textEditing = false;
+  }
+
+  if (statusMode === "drawing") {
+    drawingSyncedToBoard = false;
+    drawingEditing = true;
   }
 
   if (values.BRIGHTNESS !== undefined) {
-    const hardwareBrightness =
-      Number(values.BRIGHTNESS);
+    state.brightness =
+      hardwareBrightnessToUi(values.BRIGHTNESS);
+  }
 
-    state.brightness = clamp(
-      (hardwareBrightness + 4) / 25,
-      0.2,
-      1
-    );
+  if (values.MATRIX !== undefined) {
+    const match = values.MATRIX.match(/^(\d+)x(\d+)$/i);
+
+    if (match) {
+      connectedMatrixSize = {
+        width: Number(match[1]),
+        height: Number(match[2])
+      };
+
+      applyMatrixSize(
+        connectedMatrixSize.width,
+        connectedMatrixSize.height,
+        true
+      );
+    }
   }
 
   resetAnimation();
@@ -1884,7 +2392,7 @@ function processSerialLine(line) {
     });
 
     elements.getStatusBtn.addEventListener("click", () => {
-    sendSerialCommand("STATUS");
+      syncStatusFromBoard();
     });
 
     async function toggleFullscreen() {
@@ -1901,7 +2409,13 @@ function processSerialLine(line) {
       }
     }
 
-    function applyMatrixSize(width, height) {
+    function applyMatrixSize(width, height, fromHardware = false) {
+      if (connectedMatrixSize && !fromHardware) {
+        setStatus("Matrix size is controlled by the connected Pixel Board.");
+        syncUI();
+        return;
+      }
+
       const safeWidth = clamp(Number(width), 8, 256);
       const safeHeight = clamp(Number(height), 8, 64);
       display = resizeDisplay(
@@ -1942,10 +2456,15 @@ function processSerialLine(line) {
 
       syncUI();
       saveApplicationState();
+
+      handleDisplaySettingChanged(`PAUSED:${state.paused ? 1 : 0}`);
     });
 
     elements.resetAnimationBtn.addEventListener("click", () => {
       resetAnimation();
+
+      handleDisplaySettingChanged("RESET");
+
       setStatus("Animation reset.");
     });
 
@@ -1954,6 +2473,8 @@ function processSerialLine(line) {
         clearDisplay(drawing);
         display = buildCenteredContentFrame();
         renderNeeded = true;
+        markDrawingDirty();
+        syncUI();
         saveApplicationState();
         setStatus("Drawing cleared.");
         return;
@@ -1962,8 +2483,10 @@ function processSerialLine(line) {
       state.text = "";
       clearDisplay(display);
       resetAnimation();
+      markTextDirty();
       syncUI();
       saveApplicationState();
+
       setStatus("Message cleared.");
     });
 
@@ -1989,19 +2512,13 @@ function processSerialLine(line) {
   state.text = event.target.value;
 
   resetAnimation();
+  markTextDirty();
   saveApplicationState();
-
-  if (serialPort?.writable) {
-    sendSerialCommand(`MESSAGE:${state.text}`);
-  }
 });
 
     elements.contentType.addEventListener("change", (event) => {
       state.contentType = event.target.value;
-
-      if (state.contentType === "drawing") {
-        state.paused = true;
-      }
+      state.color = getActiveColor();
 
       syncUI();
       resetAnimation();
@@ -2013,6 +2530,8 @@ function processSerialLine(line) {
       syncUI();
       resetAnimation();
       saveApplicationState();
+
+      handleDisplaySettingChanged(`EFFECT:${state.effect}`);
     });
 
     elements.dir.addEventListener("change", (event) => {
@@ -2020,17 +2539,18 @@ function processSerialLine(line) {
       syncUI();
       resetAnimation();
       saveApplicationState();
+
+      handleDisplaySettingChanged(`DIRECTION:${state.direction}`);
     });
 
     elements.speed.addEventListener("input", (event) => {
-  state.speed = Number(event.target.value);
-  elements.speedVal.textContent = String(state.speed);
-  saveApplicationState();
+      state.speed = Number(event.target.value);
+      elements.speedVal.textContent = String(state.speed);
+      resetAnimation();
+      saveApplicationState();
 
-  if (serialPort?.writable) {
-    sendSerialCommand(`SPEED:${state.speed}`);
-  }
-});
+      handleDisplaySettingChanged(`SPEED:${state.speed}`);
+    });
 
 elements.bright.addEventListener("input", (event) => {
   state.brightness = Number(event.target.value);
@@ -2043,7 +2563,7 @@ elements.bright.addEventListener("input", (event) => {
 
   if (serialPort?.writable) {
     const hardwareBrightness =
-      Math.round(state.brightness * 25)-4;
+      uiBrightnessToHardware(state.brightness);
 
     sendSerialCommand(
       `BRIGHTNESS:${hardwareBrightness}`
@@ -2090,6 +2610,8 @@ elements.bright.addEventListener("input", (event) => {
         String(state.blinkOnMs);
       resetAnimation();
       saveApplicationState();
+
+      handleDisplaySettingChanged(`BLINK_ON:${state.blinkOnMs}`);
     });
 
     elements.blinkOff.addEventListener("input", (event) => {
@@ -2098,6 +2620,8 @@ elements.bright.addEventListener("input", (event) => {
         String(state.blinkOffMs);
       resetAnimation();
       saveApplicationState();
+
+      handleDisplaySettingChanged(`BLINK_OFF:${state.blinkOffMs}`);
     });
 
     elements.brushLightPanel.addEventListener("click", () => {
@@ -2142,9 +2666,8 @@ elements.bright.addEventListener("input", (event) => {
         drawing = createDisplay(parsed.width, parsed.height);
         replaceDisplayPixels(drawing, parsed.pixels);
         state.contentType = "drawing";
-        state.effect = "still";
-        state.paused = true;
         display = buildCenteredContentFrame();
+        markDrawingDirty();
 
         resizeCanvasForPreview();
         syncUI();
@@ -2155,16 +2678,13 @@ elements.bright.addEventListener("input", (event) => {
       }
     }
 
+    elements.publishTextBtn.addEventListener("click", publishTextToBoard);
     elements.copyFramePanel.addEventListener("click", copyCurrentFrame);
     elements.loadFramePanel.addEventListener("click", loadFrameFromPrompt);
+    elements.sendFramePanel.addEventListener("click", sendDrawingFrameToBoard);
 
     elements.canvas.addEventListener("pointerdown", (event) => {
       if (state.contentType !== "drawing") {
-        return;
-      }
-
-      if (!state.paused) {
-        setStatus("Pause playback before editing the drawing.");
         return;
       }
 
@@ -2179,7 +2699,6 @@ elements.bright.addEventListener("input", (event) => {
 
       if (
         state.contentType !== "drawing" ||
-        !state.paused ||
         !pointerDown
       ) {
         return;
@@ -2198,19 +2717,16 @@ elements.bright.addEventListener("input", (event) => {
     });
 
 elements.color.addEventListener("input", (event) => {
-  state.color = event.target.value;
-  updateContentAccent(state.color);
+  setActiveColor(event.target.value);
+  updateContentAccent(getActiveColor());
 
   renderNeeded = true;
-  saveApplicationState();
-
-  if (serialPort?.writable) {
-    const color = hexToRgb(state.color);
-
-    sendSerialCommand(
-      `COLOR:${color.red},${color.green},${color.blue}`
-    );
+  if (state.contentType === "drawing") {
+    drawingEditing = true;
+  } else {
+    markTextDirty();
   }
+  saveApplicationState();
 });
 
     /* =========================================================
