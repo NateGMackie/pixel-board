@@ -668,6 +668,66 @@
                   <label for="solidPresetColor">Solid color</label>
                   <input id="solidPresetColor" type="color" value="#ff6600" />
                 </div>
+                <div class="field" id="clockPresetSettings" hidden>
+                  <label for="clockPresetColor">Clock color</label>
+                  <input id="clockPresetColor" type="color" value="#ff6600" />
+                  <div class="two" style="margin-top:10px">
+                    <div>
+                      <label for="clockFormat">Format</label>
+                      <select id="clockFormat">
+                        <option value="12">12-hour</option>
+                        <option value="24">24-hour</option>
+                      </select>
+                    </div>
+                    <label class="tag" style="align-self:end">
+                      <input id="clockLeadingZero" type="checkbox" />
+                      Leading zero
+                    </label>
+                  </div>
+                </div>
+                <div class="field" id="rainPresetSettings" hidden>
+                  <label for="rainPresetColor">Rain color</label>
+                  <input id="rainPresetColor" type="color" value="#00ff66" />
+                  <div class="three" style="margin-top:10px">
+                    <div>
+                      <label for="rainSpeed">Rain speed</label>
+                      <input id="rainSpeed" type="range" min="1" max="20" value="8" />
+                      <div class="mini"><span id="rainSpeedVal">8</span> updates per second</div>
+                    </div>
+                    <div>
+                      <label for="rainDensity">Density</label>
+                      <input id="rainDensity" type="range" min="1" max="100" value="45" />
+                      <div class="mini"><span id="rainDensityVal">45</span></div>
+                    </div>
+                    <div>
+                      <label for="rainTrail">Trail length</label>
+                      <input id="rainTrail" type="range" min="2" max="7" value="4" />
+                      <div class="mini"><span id="rainTrailVal">4</span> pixels</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="field" id="firePresetSettings" hidden>
+                  <div class="three">
+                    <div>
+                      <label for="firePalette">Palette</label>
+                      <select id="firePalette">
+                        <option value="classic">Classic</option>
+                        <option value="blue">Blue</option>
+                        <option value="purple">Purple</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="fireSpeed">Fire speed</label>
+                      <input id="fireSpeed" type="range" min="1" max="20" value="10" />
+                      <div class="mini"><span id="fireSpeedVal">10</span> updates per second</div>
+                    </div>
+                    <div>
+                      <label for="fireIntensity">Intensity</label>
+                      <input id="fireIntensity" type="range" min="1" max="100" value="60" />
+                      <div class="mini"><span id="fireIntensityVal">60</span></div>
+                    </div>
+                  </div>
+                </div>
                 <div class="btnrow" style="margin-top:10px">
                   <button id="publishPresetBtn" type="button">Display on Pixel Board</button>
                 </div>
@@ -864,24 +924,37 @@
         firmwareId: "CLOCK",
         name: "Digital Clock",
         description: "Show the current time.",
-        available: false,
-        defaultSettings: {}
+        available: true,
+        defaultSettings: {
+          color: "#ff6600",
+          format: "12",
+          leadingZero: false
+        }
       },
       rain: {
         id: "rain",
         firmwareId: "RAIN",
         name: "Digital Rain",
         description: "Animated cascading pixels.",
-        available: false,
-        defaultSettings: {}
+        available: true,
+        defaultSettings: {
+          color: "#00ff66",
+          speed: 8,
+          density: 45,
+          trail: 4
+        }
       },
       fire: {
         id: "fire",
         firmwareId: "FIRE",
         name: "Fire",
         description: "Animated flame simulation.",
-        available: false,
-        defaultSettings: {}
+        available: true,
+        defaultSettings: {
+          palette: "classic",
+          speed: 10,
+          intensity: 60
+        }
       }
     };
 
@@ -1107,6 +1180,216 @@
       }
     }
 
+    function multiplyColor(hex, factor) {
+      const color = hexToRgb(hex);
+
+      return rgbToHex(
+        clamp(Math.round(color.red * factor), 0, 255),
+        clamp(Math.round(color.green * factor), 0, 255),
+        clamp(Math.round(color.blue * factor), 0, 255)
+      );
+    }
+
+    function mixColors(from, to, amount) {
+      const start = hexToRgb(from);
+      const end = hexToRgb(to);
+      const ratio = clamp(amount, 0, 1);
+
+      return rgbToHex(
+        Math.round(start.red + (end.red - start.red) * ratio),
+        Math.round(start.green + (end.green - start.green) * ratio),
+        Math.round(start.blue + (end.blue - start.blue) * ratio)
+      );
+    }
+
+    function isAutonomousPreset(presetId = state.selectedPresetId) {
+      return presetId === "rain" || presetId === "fire";
+    }
+
+    function initializeRainPreview() {
+      autonomousPreview.rain.columns = Array.from(
+        { length: display.width },
+        () => ({
+          active: false,
+          head: -1,
+          delay: Math.floor(Math.random() * display.height)
+        })
+      );
+    }
+
+    function initializeFirePreview() {
+      autonomousPreview.fire.heat = Array.from(
+        { length: display.height },
+        () => Array(display.width).fill(0)
+      );
+    }
+
+    function initializeAutonomousPreview() {
+      initializeRainPreview();
+      initializeFirePreview();
+      autonomousPreview.lastTickAt = performance.now();
+    }
+
+    function renderRainPreview() {
+      const frame = createDisplay(display.width, display.height);
+      const settings = state.presetSettings.rain;
+      const trail = clamp(Number(settings.trail), 2, 7);
+
+      autonomousPreview.rain.columns.forEach(column => {
+        if (!column.active) {
+          return;
+        }
+
+        for (let offset = 0; offset < trail; offset += 1) {
+          const y = column.head - offset;
+
+          if (y < 0 || y >= frame.height) {
+            continue;
+          }
+
+          const intensity = offset === 0
+            ? 1
+            : Math.max(0.15, 1 - offset / trail);
+          const color = offset === 0
+            ? mixColors(settings.color, "#ffffff", 0.55)
+            : multiplyColor(settings.color, intensity);
+
+          frame.pixels[y][column.index] = color;
+        }
+      });
+
+      display = frame;
+      renderNeeded = true;
+    }
+
+    function updateRainPreview() {
+      const settings = state.presetSettings.rain;
+      const density = clamp(Number(settings.density), 1, 100);
+      const trail = clamp(Number(settings.trail), 2, 7);
+
+      autonomousPreview.rain.columns.forEach((column, index) => {
+        column.index = index;
+
+        if (column.active) {
+          column.head += 1;
+
+          if (column.head - trail > display.height) {
+            column.active = false;
+            column.delay = Math.floor(Math.random() * 8);
+          }
+
+          return;
+        }
+
+        if (column.delay > 0) {
+          column.delay -= 1;
+          return;
+        }
+
+        if (Math.random() * 100 < density) {
+          column.active = true;
+          column.head = 0;
+        } else {
+          column.delay = 1 + Math.floor(Math.random() * 5);
+        }
+      });
+
+      renderRainPreview();
+    }
+
+    function firePaletteColor(palette, heat) {
+      const value = clamp(heat, 0, 255);
+      const amount = value / 255;
+
+      if (palette === "blue") {
+        if (amount < 0.45) {
+          return mixColors("#000014", "#0040ff", amount / 0.45);
+        }
+
+        if (amount < 0.82) {
+          return mixColors("#0040ff", "#00ffff", (amount - 0.45) / 0.37);
+        }
+
+        return mixColors("#00ffff", "#d8f7ff", (amount - 0.82) / 0.18);
+      }
+
+      if (palette === "purple") {
+        if (amount < 0.45) {
+          return mixColors("#100018", "#6a00a8", amount / 0.45);
+        }
+
+        if (amount < 0.82) {
+          return mixColors("#6a00a8", "#ff2bd6", (amount - 0.45) / 0.37);
+        }
+
+        return mixColors("#ff2bd6", "#ffd3f7", (amount - 0.82) / 0.18);
+      }
+
+      if (amount < 0.38) {
+        return mixColors("#120000", "#cc1800", amount / 0.38);
+      }
+
+      if (amount < 0.75) {
+        return mixColors("#cc1800", "#ffae00", (amount - 0.38) / 0.37);
+      }
+
+      return mixColors("#ffae00", "#fff0b8", (amount - 0.75) / 0.25);
+    }
+
+    function renderFirePreview() {
+      const frame = createDisplay(display.width, display.height);
+      const settings = state.presetSettings.fire;
+
+      for (let y = 0; y < display.height; y += 1) {
+        for (let x = 0; x < display.width; x += 1) {
+          const heat = autonomousPreview.fire.heat[y]?.[x] ?? 0;
+
+          frame.pixels[y][x] =
+            heat > 6 ? firePaletteColor(settings.palette, heat) : PIXEL_OFF;
+        }
+      }
+
+      display = frame;
+      renderNeeded = true;
+    }
+
+    function updateFirePreview() {
+      const settings = state.presetSettings.fire;
+      const intensity = clamp(Number(settings.intensity), 1, 100);
+      const heat = autonomousPreview.fire.heat;
+
+      for (let y = 0; y < display.height; y += 1) {
+        for (let x = 0; x < display.width; x += 1) {
+          const cooling = 18 + Math.floor(Math.random() * 34);
+          heat[y][x] = Math.max(0, heat[y][x] - cooling);
+        }
+      }
+
+      for (let y = 0; y < display.height - 1; y += 1) {
+        for (let x = 0; x < display.width; x += 1) {
+          const below = heat[y + 1][x];
+          const belowLeft = heat[y + 1][Math.max(0, x - 1)];
+          const belowRight = heat[y + 1][Math.min(display.width - 1, x + 1)];
+
+          heat[y][x] = Math.floor((below * 2 + belowLeft + belowRight) / 4);
+        }
+      }
+
+      const bottom = display.height - 1;
+
+      for (let x = 0; x < display.width; x += 1) {
+        if (Math.random() * 100 < intensity) {
+          heat[bottom][x] = clamp(
+            heat[bottom][x] + 120 + Math.floor(Math.random() * 136),
+            0,
+            255
+          );
+        }
+      }
+
+      renderFirePreview();
+    }
+
     function buildPresetBitmap() {
       const pixels = createPixelGrid(display.width, display.height);
 
@@ -1121,6 +1404,44 @@
             pixels[y][x] = color;
           }
         }
+      }
+
+      if (state.selectedPresetId === "clock") {
+        const clockSettings = state.presetSettings.clock;
+        const timeText = getClockDisplayText(new Date(), clockSettings);
+        const clockBitmap = buildTextBitmap(timeText);
+        const clockPixels = clockBitmap.pixels.map(row =>
+          row.map(pixel => pixel ? clockSettings.color : PIXEL_OFF)
+        );
+        const x = Math.floor((display.width - clockBitmap.columns) / 2);
+        const y = Math.floor((display.height - clockBitmap.rows) / 2);
+
+        blit(
+          { width: display.width, height: display.height, pixels },
+          clockPixels,
+          x,
+          y
+        );
+      }
+
+      if (state.selectedPresetId === "rain") {
+        renderRainPreview();
+
+        return {
+          pixels: display.pixels,
+          rows: display.height,
+          columns: display.width
+        };
+      }
+
+      if (state.selectedPresetId === "fire") {
+        renderFirePreview();
+
+        return {
+          pixels: display.pixels,
+          rows: display.height,
+          columns: display.width
+        };
       }
 
       return {
@@ -1385,6 +1706,24 @@ function updateContentAccent(hex) {
       presetGrid: document.getElementById("presetGrid"),
       solidPresetSettings: document.getElementById("solidPresetSettings"),
       solidPresetColor: document.getElementById("solidPresetColor"),
+      clockPresetSettings: document.getElementById("clockPresetSettings"),
+      clockPresetColor: document.getElementById("clockPresetColor"),
+      clockFormat: document.getElementById("clockFormat"),
+      clockLeadingZero: document.getElementById("clockLeadingZero"),
+      rainPresetSettings: document.getElementById("rainPresetSettings"),
+      rainPresetColor: document.getElementById("rainPresetColor"),
+      rainSpeed: document.getElementById("rainSpeed"),
+      rainDensity: document.getElementById("rainDensity"),
+      rainTrail: document.getElementById("rainTrail"),
+      rainSpeedVal: document.getElementById("rainSpeedVal"),
+      rainDensityVal: document.getElementById("rainDensityVal"),
+      rainTrailVal: document.getElementById("rainTrailVal"),
+      firePresetSettings: document.getElementById("firePresetSettings"),
+      firePalette: document.getElementById("firePalette"),
+      fireSpeed: document.getElementById("fireSpeed"),
+      fireIntensity: document.getElementById("fireIntensity"),
+      fireSpeedVal: document.getElementById("fireSpeedVal"),
+      fireIntensityVal: document.getElementById("fireIntensityVal"),
       publishPresetBtn: document.getElementById("publishPresetBtn"),
       directionField: document.getElementById("directionField"),
       speedField: document.getElementById("speedField"),
@@ -1433,6 +1772,22 @@ function updateContentAccent(hex) {
       presetSettings: {
         solid: {
           color: "#ff6600"
+        },
+        clock: {
+          color: "#ff6600",
+          format: "12",
+          leadingZero: false
+        },
+        rain: {
+          color: "#00ff66",
+          speed: 8,
+          density: 45,
+          trail: 4
+        },
+        fire: {
+          palette: "classic",
+          speed: 10,
+          intensity: 60
         }
       }
     };
@@ -1448,17 +1803,26 @@ function updateContentAccent(hex) {
       blinkVisible: true,
       nextBlinkAt: performance.now() + state.blinkOnMs
     };
+    let autonomousPreview = {
+      lastTickAt: performance.now(),
+      rain: {
+        columns: []
+      },
+      fire: {
+        heat: []
+      }
+    };
 
     let pointerDown = false;
     let previousDoodleCell = null;
     let renderNeeded = true;
     let lastTickAt = performance.now();
-    let serialPort = null;
-    let serialReader = null;
-    let serialReceiveBuffer = "";
+    let activeTransport = null;
     let connectedMatrixSize = null;
     let hasReceivedStatus = false;
     let statusSyncRequestId = 0;
+    let clockSyncTimerId = null;
+    let lastClockPreviewMinute = "";
     let drawingDirty = false;
     let drawingDisplayDirty = false;
     let displayedContentType = null;
@@ -1470,6 +1834,16 @@ function updateContentAccent(hex) {
     let presetEditing = true;
     let presetSyncedToBoard = false;
     let publishedPresetId = null;
+    let presetDirtyById = {
+      solid: false,
+      clock: false,
+      rain: false,
+      fire: false
+    };
+
+    function isPixelBoardConnected() {
+      return Boolean(activeTransport?.isConnected());
+    }
 
     function rgbToHex(red, green, blue) {
   return "#" +
@@ -1497,6 +1871,14 @@ function updateContentAccent(hex) {
 
     function getActiveColor() {
       if (state.contentType === "preset") {
+        if (state.selectedPresetId === "clock") {
+          return state.presetSettings.clock.color;
+        }
+
+        if (state.selectedPresetId === "rain") {
+          return state.presetSettings.rain.color;
+        }
+
         return state.presetSettings.solid.color;
       }
 
@@ -1507,7 +1889,13 @@ function updateContentAccent(hex) {
 
     function setActiveColor(color) {
       if (state.contentType === "preset") {
-        state.presetSettings.solid.color = color;
+        if (state.selectedPresetId === "clock") {
+          state.presetSettings.clock.color = color;
+        } else if (state.selectedPresetId === "rain") {
+          state.presetSettings.rain.color = color;
+        } else {
+          state.presetSettings.solid.color = color;
+        }
       } else if (state.contentType === "drawing") {
         state.drawingColor = color;
       } else {
@@ -1522,13 +1910,50 @@ function updateContentAccent(hex) {
       return color || fallback;
     }
 
+    function normalizeClockFormat(value) {
+      return String(value) === "24" ? "24" : "12";
+    }
+
+    function getClockDisplayText(date, settings) {
+      const format = normalizeClockFormat(settings.format);
+      let hours = date.getHours();
+      const minutes = date.getMinutes();
+
+      if (format === "12") {
+        hours %= 12;
+
+        if (hours === 0) {
+          hours = 12;
+        }
+      }
+
+      const hourText = settings.leadingZero
+        ? String(hours).padStart(2, "0")
+        : String(hours);
+      const minuteText = String(minutes).padStart(2, "0");
+
+      return `${hourText}:${minuteText}`;
+    }
+
+    function getClockPreviewMinuteKey() {
+      const now = new Date();
+
+      return [
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        now.getHours(),
+        now.getMinutes()
+      ].join(":");
+    }
+
     function isCurrentDraftDirty() {
       if (state.contentType === "drawing") {
         return drawingDirty || drawingDisplayDirty;
       }
 
       if (state.contentType === "preset") {
-        return presetDirty;
+        return Boolean(presetDirtyById[state.selectedPresetId]);
       }
 
       return textDirty;
@@ -1596,12 +2021,23 @@ function updateContentAccent(hex) {
           ? "Drawing"
           : (
               displayedContentType === "preset"
-                ? getContentLabel("preset")
+                ? (PRESET_REGISTRY[publishedPresetId]?.name ?? "Preset")
                 : (displayedContentType === "text" ? "Text" : "Unknown")
             );
 
       if (isCurrentLive()) {
         return `Live ${editor} · Pixel Board up to date`;
+      }
+
+      if (displayedContentType !== state.contentType) {
+        return `Editing ${editor} · Not displayed`;
+      }
+
+      if (
+        state.contentType === "preset" &&
+        publishedPresetId !== state.selectedPresetId
+      ) {
+        return `Editing ${editor} · Not displayed`;
       }
 
       return `Editing ${editor} · Pixel Board displaying ${board}`;
@@ -1631,23 +2067,28 @@ function updateContentAccent(hex) {
     }
 
     function markPresetDirty() {
+      presetDirtyById[state.selectedPresetId] = true;
       presetDirty = true;
       presetSyncedToBoard = false;
       presetEditing = true;
       syncUI();
     }
 
+    function syncPresetDirtyFlag() {
+      presetDirty = Object.values(presetDirtyById).some(Boolean);
+    }
+
     function handleDisplaySettingChanged(command) {
       if (state.contentType !== "drawing") {
-        if (serialPort?.writable) {
-          sendSerialCommand(command);
+        if (isPixelBoardConnected()) {
+          sendCommand(command);
         }
 
         return;
       }
 
-      if (serialPort?.writable && displayedContentType === "drawing") {
-        sendSerialCommand(command);
+      if (isPixelBoardConnected() && displayedContentType === "drawing") {
+        sendCommand(command);
       }
 
       if (drawingDirty || displayedContentType !== "drawing") {
@@ -1677,7 +2118,8 @@ function updateContentAccent(hex) {
           presetDirty,
           presetEditing,
           presetSyncedToBoard,
-          publishedPresetId
+          publishedPresetId,
+          presetDirtyById
         },
         display: {
           width: display.width,
@@ -1740,10 +2182,44 @@ function updateContentAccent(hex) {
           solid: {
             ...PRESET_REGISTRY.solid.defaultSettings,
             ...(state.presetSettings?.solid ?? {})
+          },
+          clock: {
+            ...PRESET_REGISTRY.clock.defaultSettings,
+            ...(state.presetSettings?.clock ?? {})
+          },
+          rain: {
+            ...PRESET_REGISTRY.rain.defaultSettings,
+            ...(state.presetSettings?.rain ?? {})
+          },
+          fire: {
+            ...PRESET_REGISTRY.fire.defaultSettings,
+            ...(state.presetSettings?.fire ?? {})
           }
         };
         state.presetSettings.solid.color =
           normalizeStateColor(state.presetSettings.solid.color, "#FF6600");
+        state.presetSettings.clock.color =
+          normalizeStateColor(state.presetSettings.clock.color, "#FF6600");
+        state.presetSettings.clock.format =
+          normalizeClockFormat(state.presetSettings.clock.format);
+        state.presetSettings.clock.leadingZero =
+          Boolean(state.presetSettings.clock.leadingZero);
+        state.presetSettings.rain.color =
+          normalizeStateColor(state.presetSettings.rain.color, "#00FF66");
+        state.presetSettings.rain.speed =
+          clamp(Number(state.presetSettings.rain.speed), 1, 20);
+        state.presetSettings.rain.density =
+          clamp(Number(state.presetSettings.rain.density), 1, 100);
+        state.presetSettings.rain.trail =
+          clamp(Number(state.presetSettings.rain.trail), 2, 7);
+        state.presetSettings.fire.palette =
+          ["classic", "blue", "purple"].includes(state.presetSettings.fire.palette)
+            ? state.presetSettings.fire.palette
+            : "classic";
+        state.presetSettings.fire.speed =
+          clamp(Number(state.presetSettings.fire.speed), 1, 20);
+        state.presetSettings.fire.intensity =
+          clamp(Number(state.presetSettings.fire.intensity), 1, 100);
         state.color = getActiveColor();
 
         if (saved.publication) {
@@ -1758,6 +2234,19 @@ function updateContentAccent(hex) {
           drawingSyncedToBoard =
             Boolean(saved.publication.drawingSyncedToBoard);
           presetDirty = Boolean(saved.publication.presetDirty);
+          presetDirtyById = {
+            ...presetDirtyById,
+            ...(saved.publication.presetDirtyById ?? {})
+          };
+
+          if (
+            saved.publication.presetDirty &&
+            !saved.publication.presetDirtyById
+          ) {
+            presetDirtyById[state.selectedPresetId] = true;
+          }
+
+          syncPresetDirtyFlag();
           presetEditing = saved.publication.presetEditing !== false;
           presetSyncedToBoard =
             Boolean(saved.publication.presetSyncedToBoard);
@@ -1875,15 +2364,18 @@ function updateContentAccent(hex) {
       const isDrawing = state.contentType === "drawing";
       const isPreset = state.contentType === "preset";
       const selectedPreset = getSelectedPreset();
+      const isAutonomous = isPreset && isAutonomousPreset();
       const isLive = isCurrentLive();
       const isEditing = !isLive;
       const canEditDrawing = isDrawing && isEditing;
       const canEditPreset = isPreset && isEditing && selectedPreset.available;
       const usesDirection =
         isLive &&
+        !isAutonomous &&
         (state.effect === "scroll" || state.effect === "wipe");
       const usesSpeed =
         isLive &&
+        !isAutonomous &&
         (state.effect === "scroll" || state.effect === "wipe");
 
       elements.clearBtn.textContent =
@@ -1900,6 +2392,39 @@ function updateContentAccent(hex) {
         !isPreset || state.selectedPresetId !== "solid";
       elements.solidPresetColor.value = state.presetSettings.solid.color;
       elements.solidPresetColor.disabled = !canEditPreset;
+      elements.clockPresetSettings.hidden =
+        !isPreset || state.selectedPresetId !== "clock";
+      elements.clockPresetColor.value = state.presetSettings.clock.color;
+      elements.clockPresetColor.disabled = !canEditPreset;
+      elements.clockFormat.value = state.presetSettings.clock.format;
+      elements.clockFormat.disabled = !canEditPreset;
+      elements.clockLeadingZero.checked =
+        state.presetSettings.clock.leadingZero;
+      elements.clockLeadingZero.disabled = !canEditPreset;
+      elements.rainPresetSettings.hidden =
+        !isPreset || state.selectedPresetId !== "rain";
+      elements.rainPresetColor.value = state.presetSettings.rain.color;
+      elements.rainPresetColor.disabled = !canEditPreset;
+      elements.rainSpeed.value = String(state.presetSettings.rain.speed);
+      elements.rainSpeed.disabled = !canEditPreset;
+      elements.rainDensity.value = String(state.presetSettings.rain.density);
+      elements.rainDensity.disabled = !canEditPreset;
+      elements.rainTrail.value = String(state.presetSettings.rain.trail);
+      elements.rainTrail.disabled = !canEditPreset;
+      elements.rainSpeedVal.textContent = String(state.presetSettings.rain.speed);
+      elements.rainDensityVal.textContent = String(state.presetSettings.rain.density);
+      elements.rainTrailVal.textContent = String(state.presetSettings.rain.trail);
+      elements.firePresetSettings.hidden =
+        !isPreset || state.selectedPresetId !== "fire";
+      elements.firePalette.value = state.presetSettings.fire.palette;
+      elements.firePalette.disabled = !canEditPreset;
+      elements.fireSpeed.value = String(state.presetSettings.fire.speed);
+      elements.fireSpeed.disabled = !canEditPreset;
+      elements.fireIntensity.value = String(state.presetSettings.fire.intensity);
+      elements.fireIntensity.disabled = !canEditPreset;
+      elements.fireSpeedVal.textContent = String(state.presetSettings.fire.speed);
+      elements.fireIntensityVal.textContent =
+        String(state.presetSettings.fire.intensity);
       elements.clearBtn.disabled = isPreset || !isEditing;
       elements.brushLightPanel.disabled = !canEditDrawing;
       elements.brushErasePanel.disabled = !canEditDrawing;
@@ -1907,16 +2432,18 @@ function updateContentAccent(hex) {
       elements.loadFramePanel.disabled = !canEditDrawing;
 
       // Effect-specific controls
-      elements.directionField.hidden = !usesDirection;
-      elements.speedField.hidden = !usesSpeed;
-      elements.blinkRow.hidden = !isLive || state.effect !== "blink";
+      elements.effect.parentElement.hidden = isAutonomous;
+      elements.directionField.hidden = isAutonomous || !usesDirection;
+      elements.speedField.hidden = isAutonomous || !usesSpeed;
+      elements.blinkRow.hidden =
+        isAutonomous || !isLive || state.effect !== "blink";
 
       elements.dir.disabled = !usesDirection;
       elements.speed.disabled = !usesSpeed;
-      elements.effect.disabled = !isLive;
-      elements.playPause.disabled = !isLive;
+      elements.effect.disabled = isAutonomous || !isLive;
+      elements.playPause.disabled = isAutonomous || !isLive;
       elements.resetAnimationBtn.disabled =
-        !isLive || state.effect === "still";
+        isAutonomous || !isLive || state.effect === "still";
 
       elements.publishTextBtn.textContent =
         isLive
@@ -1927,7 +2454,7 @@ function updateContentAccent(hex) {
                 : "Display on Pixel Board"
             );
       elements.publishTextBtn.disabled =
-        !isDrawing && !serialPort?.writable && !isLive;
+        !isDrawing && !isPixelBoardConnected() && !isLive;
 
       elements.publishPresetBtn.textContent =
         isLive
@@ -1942,14 +2469,14 @@ function updateContentAccent(hex) {
         isPreset &&
         (
           (!selectedPreset.available && !isLive) ||
-          (!serialPort?.writable && !isLive)
+          (!isPixelBoardConnected() && !isLive)
         );
 
       elements.sendFramePanel.disabled =
         isLive
           ? false
           : (
-              !serialPort?.writable ||
+              !isPixelBoardConnected() ||
               (!drawingDirty && !drawingDisplayDirty && !drawingEditing)
             );
       elements.sendFramePanel.textContent =
@@ -2000,6 +2527,21 @@ function updateContentAccent(hex) {
        ========================================================= */
 
     function resetAnimation() {
+      if (
+        state.contentType === "preset" &&
+        isAutonomousPreset()
+      ) {
+        initializeAutonomousPreview();
+
+        if (state.selectedPresetId === "rain") {
+          updateRainPreview();
+        } else {
+          updateFirePreview();
+        }
+
+        return;
+      }
+
       textBitmap = getContentBitmap();
       lastTickAt = performance.now();
       animation.wipe = 0;
@@ -2125,6 +2667,33 @@ function updateContentAccent(hex) {
       return true;
     }
 
+    function renderWipeAtCurrentProgress() {
+      const savedProgress = animation.wipe;
+
+      animation.wipe -= 1;
+      updateWipe();
+      animation.wipe = savedProgress;
+    }
+
+    function refreshAnimatedContentBitmap() {
+      textBitmap = getContentBitmap();
+
+      if (!isCurrentLive()) {
+        display = buildCenteredContentFrame();
+      } else if (state.effect === "blink" && !animation.blinkVisible) {
+        clearDisplay(display);
+      } else if (state.effect === "scroll") {
+        clearDisplay(display);
+        blit(display, textBitmap.pixels, animation.x, animation.y);
+      } else if (state.effect === "wipe") {
+        renderWipeAtCurrentProgress();
+      } else {
+        display = buildCenteredContentFrame();
+      }
+
+      renderNeeded = true;
+    }
+
     function updateScroll() {
       clearDisplay(display);
 
@@ -2162,6 +2731,34 @@ function updateContentAccent(hex) {
 
     function updateAnimation(now) {
       if (
+        state.contentType === "preset" &&
+        isAutonomousPreset()
+      ) {
+        const presetSettings = state.presetSettings[state.selectedPresetId];
+        const interval = Math.floor(
+          1000 / clamp(Number(presetSettings.speed), 1, 20)
+        );
+
+        if (now - autonomousPreview.lastTickAt < interval) {
+          return false;
+        }
+
+        autonomousPreview.lastTickAt += interval;
+
+        if (now - autonomousPreview.lastTickAt > interval * 4) {
+          autonomousPreview.lastTickAt = now;
+        }
+
+        if (state.selectedPresetId === "rain") {
+          updateRainPreview();
+        } else {
+          updateFirePreview();
+        }
+
+        return true;
+      }
+
+      if (
         !isCurrentLive() ||
         state.paused ||
         state.effect === "still"
@@ -2195,6 +2792,18 @@ function updateContentAccent(hex) {
     }
 
     function applicationLoop(now) {
+      if (
+        state.contentType === "preset" &&
+        state.selectedPresetId === "clock"
+      ) {
+        const minuteKey = getClockPreviewMinuteKey();
+
+        if (minuteKey !== lastClockPreviewMinute) {
+          lastClockPreviewMinute = minuteKey;
+          refreshAnimatedContentBitmap();
+        }
+      }
+
       updateAnimation(now);
 
       if (renderNeeded) {
@@ -2286,81 +2895,333 @@ function updateContentAccent(hex) {
     }
 
     /* =========================================================
-   ESP32 serial connection
-   ========================================================= */
+       ESP32 transport
+       ========================================================= */
 
-async function connectPixelBoard() {
-  try {
-    serialPort = await navigator.serial.requestPort();
+    /*
+      Transport contract:
+      connect(), disconnect(), send(command), isConnected().
+      Implementations emit complete protocol lines and connection/error events.
+      A future WebSocket transport can implement the same small surface.
+    */
+    class SerialTransport {
+      constructor({ onLine, onConnectionChange, onDisconnect, onError }) {
+        this.onLine = onLine;
+        this.onConnectionChange = onConnectionChange;
+        this.onDisconnect = onDisconnect;
+        this.onError = onError;
+        this.port = null;
+        this.reader = null;
+        this.receiveBuffer = "";
+        this.connected = false;
+        this.readLoopActive = false;
+        this.disconnecting = false;
+        this.writeQueue = Promise.resolve();
+      }
 
-    await serialPort.open({
-      baudRate: 115200
-    });
+      async connect() {
+        if (!("serial" in navigator)) {
+          throw new Error("Web Serial is not supported by this browser.");
+        }
 
-    elements.connectBtn.textContent = "Pixel Board connected";
-    elements.connectBtn.disabled = true;
-    elements.connectionDot.classList.add("connected");
-    elements.getStatusBtn.disabled = false;
-    syncUI();
+        if (this.connected) {
+          return;
+        }
 
-    setStatus("Connected to Pixel Board.");
+        this.port = await navigator.serial.requestPort();
 
-    readSerial();
-    syncStatusFromBoard();
+        await this.port.open({
+          baudRate: 115200
+        });
 
-  } catch (error) {
-    console.error(error);
-    elements.connectionDot.classList.remove("connected");
-    setStatus("Could not connect to Pixel Board.");
-  }
-}
+        this.connected = true;
+        this.disconnecting = false;
+        this.onConnectionChange?.(true);
+        this.startReadLoop();
+      }
 
-async function syncStatusFromBoard() {
-  const requestId = statusSyncRequestId + 1;
-  statusSyncRequestId = requestId;
-  hasReceivedStatus = false;
+      async disconnect() {
+        this.disconnecting = true;
+        this.connected = false;
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if (
-      hasReceivedStatus ||
-      requestId !== statusSyncRequestId ||
-      !serialPort?.writable
-    ) {
-      return;
+        if (this.reader) {
+          try {
+            await this.reader.cancel();
+          } catch {
+            // Reader may already be closed after a physical disconnect.
+          }
+        }
+
+        if (this.port) {
+          try {
+            await this.port.close();
+          } catch {
+            // Port may already be closed by the browser/device.
+          }
+        }
+
+        this.cleanup();
+        this.onConnectionChange?.(false);
+      }
+
+      isConnected() {
+        return Boolean(this.connected && this.port?.writable);
+      }
+
+      async send(command) {
+        const text = String(command ?? "").replace(/[\r\n]+$/g, "");
+
+        if (!text) {
+          return false;
+        }
+
+        const queuedWrite = this.writeQueue.then(() =>
+          this.writeCommand(text)
+        );
+        this.writeQueue = queuedWrite.catch(() => false);
+
+        return queuedWrite;
+      }
+
+      async writeCommand(command) {
+        if (!this.isConnected()) {
+          throw new Error("Transport is not connected.");
+        }
+
+        const writer = this.port.writable.getWriter();
+
+        try {
+          const encoder = new TextEncoder();
+
+          await writer.write(encoder.encode(`${command}\n`));
+          return true;
+        } finally {
+          writer.releaseLock();
+        }
+      }
+
+      startReadLoop() {
+        if (this.readLoopActive) {
+          return;
+        }
+
+        this.readLoopActive = true;
+        this.readLoop();
+      }
+
+      async readLoop() {
+        const decoder = new TextDecoder();
+
+        try {
+          while (this.connected && this.port?.readable) {
+            this.reader = this.port.readable.getReader();
+
+            try {
+              while (this.connected) {
+                const { value, done } = await this.reader.read();
+
+                if (done) {
+                  break;
+                }
+
+                if (value) {
+                  this.receiveBuffer += decoder.decode(value, {
+                    stream: true
+                  });
+                  this.emitCompleteLines();
+                }
+              }
+            } finally {
+              this.reader.releaseLock();
+              this.reader = null;
+            }
+          }
+        } catch (error) {
+          if (!this.disconnecting) {
+            this.onError?.(error);
+          }
+        } finally {
+          this.readLoopActive = false;
+
+          if (!this.disconnecting) {
+            this.connected = false;
+            const disconnectedPort = this.port;
+
+            if (disconnectedPort) {
+              try {
+                await disconnectedPort.close();
+              } catch {
+                // The browser may already have closed the device.
+              }
+            }
+
+            this.cleanup();
+            this.onDisconnect?.();
+            this.onConnectionChange?.(false);
+          }
+        }
+      }
+
+      emitCompleteLines() {
+        let newlineIndex;
+
+        while ((newlineIndex = this.receiveBuffer.indexOf("\n")) !== -1) {
+          const line = this.receiveBuffer
+            .substring(0, newlineIndex)
+            .replace(/\r$/, "")
+            .trim();
+
+          this.receiveBuffer =
+            this.receiveBuffer.substring(newlineIndex + 1);
+
+          if (line) {
+            this.onLine?.(line);
+          }
+        }
+      }
+
+      cleanup() {
+        this.port = null;
+        this.reader = null;
+        this.receiveBuffer = "";
+        this.writeQueue = Promise.resolve();
+      }
     }
 
-    await sendSerialCommand("STATUS");
-    await delay(750);
-  }
+    function updateConnectionUi(connected) {
+      elements.connectBtn.textContent =
+        connected ? "Pixel Board connected" : "Connect Pixel Board";
+      elements.connectBtn.disabled = connected;
+      elements.connectionDot.classList.toggle("connected", connected);
+      elements.getStatusBtn.disabled = !connected;
 
-  if (!hasReceivedStatus && requestId === statusSyncRequestId) {
-    setStatus("Connected, but no board status was received.");
-  }
-}
+      if (!connected) {
+        statusSyncRequestId += 1;
+        window.clearInterval(clockSyncTimerId);
+        clockSyncTimerId = null;
+      }
 
-async function sendSerialCommand(command) {
-  if (!serialPort?.writable) {
-    setStatus("Pixel Board is not connected.");
-    return false;
-  }
+      syncUI();
+    }
 
-  const writer = serialPort.writable.getWriter();
+    async function connectToPixelBoard() {
+      if (isPixelBoardConnected()) {
+        return;
+      }
 
-  try {
-    const encoder = new TextEncoder();
+      const transport = new SerialTransport({
+        onLine: processSerialLine,
+        onConnectionChange: updateConnectionUi,
+        onDisconnect: () => {
+          activeTransport = null;
+          setStatus("Pixel Board disconnected.");
+        },
+        onError: error => {
+          console.error("Transport error:", error);
+          setStatus("Pixel Board connection was interrupted.");
+        }
+      });
 
-    await writer.write(
-      encoder.encode(command + "\n")
-    );
-    return true;
-  } catch (error) {
-    console.error("Serial write error:", error);
-    setStatus("Could not write to Pixel Board.");
-    return false;
-  } finally {
-    writer.releaseLock();
-  }
-}
+      try {
+        activeTransport = transport;
+        await transport.connect();
+        setStatus("Connected to Pixel Board.");
+        syncStatusFromBoard();
+      } catch (error) {
+        console.error(error);
+        activeTransport = null;
+        await transport.disconnect();
+        updateConnectionUi(false);
+        setStatus(error.message || "Could not connect to Pixel Board.");
+      }
+    }
+
+    async function disconnectFromPixelBoard() {
+      const transport = activeTransport;
+
+      activeTransport = null;
+      await transport?.disconnect();
+      updateConnectionUi(false);
+      setStatus("Pixel Board disconnected.");
+    }
+
+    async function syncStatusFromBoard() {
+      const requestId = statusSyncRequestId + 1;
+      statusSyncRequestId = requestId;
+      hasReceivedStatus = false;
+
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        if (
+          hasReceivedStatus ||
+          requestId !== statusSyncRequestId ||
+          !isPixelBoardConnected()
+        ) {
+          return;
+        }
+
+        await sendCommand("STATUS");
+        await delay(750);
+      }
+
+      if (!hasReceivedStatus && requestId === statusSyncRequestId) {
+        setStatus("Connected, but no board status was received.");
+      }
+    }
+
+    async function sendClockTimeSync() {
+      if (!isPixelBoardConnected()) {
+        return false;
+      }
+
+      const unixSeconds = Math.floor(Date.now() / 1000);
+      const offsetMinutesEastOfUtc = -new Date().getTimezoneOffset();
+
+      return sendCommand(
+        `CLOCK_TIME:${unixSeconds}:${offsetMinutesEastOfUtc}`
+      );
+    }
+
+    function updateClockSyncTimer() {
+      window.clearInterval(clockSyncTimerId);
+      clockSyncTimerId = null;
+
+      if (
+        isPixelBoardConnected() &&
+        displayedContentType === "preset" &&
+        publishedPresetId === "clock"
+      ) {
+        clockSyncTimerId = window.setInterval(() => {
+          sendClockTimeSync();
+        }, 5 * 60 * 1000);
+      }
+    }
+
+    async function sendCommand(command) {
+      if (!isPixelBoardConnected()) {
+        setStatus("Pixel Board is not connected.");
+        return false;
+      }
+
+      try {
+        return await activeTransport.send(command);
+      } catch (error) {
+        console.error("Transport write error:", error);
+        setStatus("Could not write to Pixel Board.");
+        return false;
+      }
+    }
+
+    async function sendCommands(commands) {
+      for (const command of commands) {
+        const sent = await sendCommand(command);
+
+        if (!sent) {
+          return false;
+        }
+      }
+
+      return true;
+    }
 
 async function sendDrawingFrameToBoard() {
   if (isCurrentLive()) {
@@ -2371,7 +3232,7 @@ async function sendDrawingFrameToBoard() {
     return;
   }
 
-  if (!serialPort?.writable) {
+  if (!isPixelBoardConnected()) {
     setStatus("Pixel Board is not connected.");
     syncUI();
     return;
@@ -2399,16 +3260,12 @@ async function sendDrawingFrameToBoard() {
   elements.sendFramePanel.textContent = "Sending...";
   elements.sendFramePanel.disabled = true;
 
-  for (const command of commands) {
-    const sent = await sendSerialCommand(command);
-
-    if (!sent) {
-      drawingDirty = true;
-      drawingEditing = true;
-      syncUI();
-      setStatus("Could not publish drawing.");
-      return;
-    }
+  if (!(await sendCommands(commands))) {
+    drawingDirty = true;
+    drawingEditing = true;
+    syncUI();
+    setStatus("Could not publish drawing.");
+    return;
   }
 
   drawingDirty = false;
@@ -2430,7 +3287,7 @@ async function publishTextToBoard() {
     return;
   }
 
-  if (!serialPort?.writable) {
+  if (!isPixelBoardConnected()) {
     setStatus("Pixel Board is not connected.");
     syncUI();
     return;
@@ -2452,16 +3309,12 @@ async function publishTextToBoard() {
   elements.publishTextBtn.textContent = "Sending...";
   elements.publishTextBtn.disabled = true;
 
-  for (const command of commands) {
-    const sent = await sendSerialCommand(command);
-
-    if (!sent) {
-      textDirty = true;
-      textEditing = true;
-      syncUI();
-      setStatus("Could not publish text.");
-      return;
-    }
+  if (!(await sendCommands(commands))) {
+    textDirty = true;
+    textEditing = true;
+    syncUI();
+    setStatus("Could not publish text.");
+    return;
   }
 
   textDirty = false;
@@ -2489,110 +3342,92 @@ async function publishPresetToBoard() {
     return;
   }
 
-  if (!serialPort?.writable) {
+  if (!isPixelBoardConnected()) {
     setStatus("Pixel Board is not connected.");
     syncUI();
     return;
   }
 
-  if (preset.id !== "solid") {
+  const commands = [];
+
+  if (preset.id === "solid") {
+    const color = hexToRgb(state.presetSettings.solid.color);
+    commands.push(`PRESET_PARAM:COLOR:${color.red},${color.green},${color.blue}`);
+  } else if (preset.id === "clock") {
+    const clock = state.presetSettings.clock;
+    const color = hexToRgb(clock.color);
+    const unixSeconds = Math.floor(Date.now() / 1000);
+    const offsetMinutesEastOfUtc = -new Date().getTimezoneOffset();
+
+    commands.push(
+      `PRESET_PARAM:CLOCK_COLOR:${color.red},${color.green},${color.blue}`,
+      `PRESET_PARAM:CLOCK_FORMAT:${clock.format}`,
+      `PRESET_PARAM:CLOCK_LEADING_ZERO:${clock.leadingZero ? 1 : 0}`,
+      `CLOCK_TIME:${unixSeconds}:${offsetMinutesEastOfUtc}`
+    );
+  } else if (preset.id === "rain") {
+    const rain = state.presetSettings.rain;
+    const color = hexToRgb(rain.color);
+
+    commands.push(
+      `PRESET_PARAM:RAIN_COLOR:${color.red},${color.green},${color.blue}`,
+      `PRESET_PARAM:RAIN_SPEED:${rain.speed}`,
+      `PRESET_PARAM:RAIN_DENSITY:${rain.density}`,
+      `PRESET_PARAM:RAIN_TRAIL:${rain.trail}`
+    );
+  } else if (preset.id === "fire") {
+    const fire = state.presetSettings.fire;
+
+    commands.push(
+      `PRESET_PARAM:FIRE_PALETTE:${fire.palette.toUpperCase()}`,
+      `PRESET_PARAM:FIRE_SPEED:${fire.speed}`,
+      `PRESET_PARAM:FIRE_INTENSITY:${fire.intensity}`
+    );
+  } else {
     setStatus("That preset is coming soon.");
     syncUI();
     return;
   }
 
-  const color = hexToRgb(state.presetSettings.solid.color);
-  const commands = [
-    `PRESET_PARAM:COLOR:${color.red},${color.green},${color.blue}`,
-    `PRESET:${preset.firmwareId}`,
-    `EFFECT:${state.effect}`,
-    `DIRECTION:${state.direction}`,
-    `SPEED:${state.speed}`,
-    `BLINK_ON:${state.blinkOnMs}`,
-    `BLINK_OFF:${state.blinkOffMs}`,
-    `PAUSED:${state.paused ? 1 : 0}`,
-    "MODE:PRESET"
-  ];
+  commands.push(`PRESET:${preset.firmwareId}`);
+
+  if (!isAutonomousPreset(preset.id)) {
+    commands.push(
+      `EFFECT:${state.effect}`,
+      `DIRECTION:${state.direction}`,
+      `SPEED:${state.speed}`,
+      `BLINK_ON:${state.blinkOnMs}`,
+      `BLINK_OFF:${state.blinkOffMs}`,
+      `PAUSED:${state.paused ? 1 : 0}`
+    );
+  }
+
+  commands.push("MODE:PRESET");
 
   elements.publishPresetBtn.textContent = "Sending...";
   elements.publishPresetBtn.disabled = true;
 
-  for (const command of commands) {
-    const sent = await sendSerialCommand(command);
-
-    if (!sent) {
-      presetDirty = true;
-      presetEditing = true;
-      presetSyncedToBoard = false;
-      syncUI();
-      setStatus("Could not publish preset.");
-      return;
-    }
+  if (!(await sendCommands(commands))) {
+    presetDirtyById[state.selectedPresetId] = true;
+    syncPresetDirtyFlag();
+    presetEditing = true;
+    presetSyncedToBoard = false;
+    syncUI();
+    setStatus("Could not publish preset.");
+    return;
   }
 
-  presetDirty = false;
+  presetDirtyById[preset.id] = false;
+  syncPresetDirtyFlag();
   presetEditing = false;
   presetSyncedToBoard = true;
   displayedContentType = "preset";
   publishedPresetId = preset.id;
   resetAnimation();
   syncUI();
+  updateClockSyncTimer();
   saveApplicationState();
   setStatus(`${preset.name} sent to Pixel Board.`);
-}
-
-async function readSerial() {
-  const decoder = new TextDecoder();
-
-  while (serialPort?.readable) {
-    serialReader = serialPort.readable.getReader();
-
-    try {
-      while (true) {
-        const { value, done } =
-          await serialReader.read();
-
-        if (done) {
-          break;
-        }
-
-        if (value) {
-          serialReceiveBuffer +=
-            decoder.decode(value, {
-              stream: true
-            });
-
-          let newlineIndex;
-
-          while (
-            (newlineIndex =
-              serialReceiveBuffer.indexOf("\n")) !== -1
-          ) {
-            const line =
-              serialReceiveBuffer.substring(
-                0,
-                newlineIndex
-              );
-
-            serialReceiveBuffer =
-              serialReceiveBuffer.substring(
-                newlineIndex + 1
-              );
-
-            processSerialLine(line);
-          }
-        }
-      }
-    } catch (error) {
-      console.error(
-        "Serial read error:",
-        error
-      );
-    } finally {
-      serialReader.releaseLock();
-      serialReader = null;
-    }
-  }
 }
 
 function processSerialLine(line) {
@@ -2697,17 +3532,21 @@ function processSerialLine(line) {
   }
 
   if (statusMode === "preset") {
+    const rawPreset = values.PRESET?.toLowerCase();
     const presetId =
-      values.PRESET?.toLowerCase() === "solid" ? "solid" : null;
+      ["solid", "clock", "rain", "fire"].includes(rawPreset)
+        ? rawPreset
+        : null;
 
     if (presetId) {
       publishedPresetId = presetId;
+      const statusPresetDirty = Boolean(presetDirtyById[presetId]);
 
-      if (!presetDirty) {
+      if (!statusPresetDirty) {
         state.selectedPresetId = presetId;
       }
 
-      if (values.PRESET_COLOR !== undefined && !presetDirty) {
+      if (values.PRESET_COLOR !== undefined && !statusPresetDirty) {
         const [red, green, blue] =
           values.PRESET_COLOR.split(",").map(Number);
 
@@ -2721,8 +3560,95 @@ function processSerialLine(line) {
         }
       }
 
-      presetSyncedToBoard = !presetDirty;
-      presetEditing = presetDirty;
+      if (presetId === "clock" && !statusPresetDirty) {
+        if (values.CLOCK_COLOR !== undefined) {
+          const [red, green, blue] =
+            values.CLOCK_COLOR.split(",").map(Number);
+
+          if (
+            Number.isFinite(red) &&
+            Number.isFinite(green) &&
+            Number.isFinite(blue)
+          ) {
+            state.presetSettings.clock.color =
+              rgbToHex(red, green, blue);
+          }
+        }
+
+        if (values.CLOCK_FORMAT !== undefined) {
+          state.presetSettings.clock.format =
+            normalizeClockFormat(values.CLOCK_FORMAT);
+        }
+
+        if (values.CLOCK_LEADING_ZERO !== undefined) {
+          state.presetSettings.clock.leadingZero =
+            values.CLOCK_LEADING_ZERO === "1";
+        }
+      }
+
+      if (presetId === "rain" && !statusPresetDirty) {
+        if (values.RAIN_COLOR !== undefined) {
+          const [red, green, blue] =
+            values.RAIN_COLOR.split(",").map(Number);
+
+          if (
+            Number.isFinite(red) &&
+            Number.isFinite(green) &&
+            Number.isFinite(blue)
+          ) {
+            state.presetSettings.rain.color =
+              rgbToHex(red, green, blue);
+          }
+        }
+
+        if (values.RAIN_SPEED !== undefined) {
+          state.presetSettings.rain.speed =
+            clamp(Number(values.RAIN_SPEED), 1, 20);
+        }
+
+        if (values.RAIN_DENSITY !== undefined) {
+          state.presetSettings.rain.density =
+            clamp(Number(values.RAIN_DENSITY), 1, 100);
+        }
+
+        if (values.RAIN_TRAIL !== undefined) {
+          state.presetSettings.rain.trail =
+            clamp(Number(values.RAIN_TRAIL), 2, 7);
+        }
+      }
+
+      if (presetId === "fire" && !statusPresetDirty) {
+        if (values.FIRE_PALETTE !== undefined) {
+          const palette = values.FIRE_PALETTE.toLowerCase();
+
+          state.presetSettings.fire.palette =
+            ["classic", "blue", "purple"].includes(palette)
+              ? palette
+              : "classic";
+        }
+
+        if (values.FIRE_SPEED !== undefined) {
+          state.presetSettings.fire.speed =
+            clamp(Number(values.FIRE_SPEED), 1, 20);
+        }
+
+        if (values.FIRE_INTENSITY !== undefined) {
+          state.presetSettings.fire.intensity =
+            clamp(Number(values.FIRE_INTENSITY), 1, 100);
+        }
+      }
+
+      syncPresetDirtyFlag();
+      presetSyncedToBoard =
+        state.selectedPresetId === presetId &&
+        !Boolean(presetDirtyById[state.selectedPresetId]);
+      presetEditing =
+        state.selectedPresetId !== presetId ||
+        Boolean(presetDirtyById[state.selectedPresetId]);
+
+      if (presetId === "clock") {
+        sendClockTimeSync();
+      }
     } else {
       presetSyncedToBoard = false;
       presetEditing = true;
@@ -2751,8 +3677,13 @@ function processSerialLine(line) {
     }
   }
 
-  resetAnimation();
+  if (!(statusMode === "preset" && publishedPresetId === "clock")) {
+    resetAnimation();
+  } else {
+    refreshAnimatedContentBitmap();
+  }
   syncUI();
+  updateClockSyncTimer();
   saveApplicationState();
 
   setStatus("Pixel Board settings synchronized.");
@@ -2778,7 +3709,7 @@ function processSerialLine(line) {
     }
 
     elements.connectBtn.addEventListener("click", () => {
-    connectPixelBoard();
+      connectToPixelBoard();
     });
 
     elements.getStatusBtn.addEventListener("click", () => {
@@ -2822,6 +3753,7 @@ function processSerialLine(line) {
       );
 
       resizeCanvasForPreview();
+      initializeAutonomousPreview();
       resetAnimation();
       syncUI();
       saveApplicationState();
@@ -2923,6 +3855,93 @@ function processSerialLine(line) {
       saveApplicationState();
     });
 
+    elements.clockPresetColor.addEventListener("input", (event) => {
+      state.presetSettings.clock.color =
+        normalizeStateColor(event.target.value, "#FF6600");
+      refreshAnimatedContentBitmap();
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.clockFormat.addEventListener("change", (event) => {
+      state.presetSettings.clock.format =
+        normalizeClockFormat(event.target.value);
+      refreshAnimatedContentBitmap();
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.clockLeadingZero.addEventListener("change", (event) => {
+      state.presetSettings.clock.leadingZero = event.target.checked;
+      refreshAnimatedContentBitmap();
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.rainPresetColor.addEventListener("input", (event) => {
+      state.presetSettings.rain.color =
+        normalizeStateColor(event.target.value, "#00FF66");
+      renderRainPreview();
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.rainSpeed.addEventListener("input", (event) => {
+      state.presetSettings.rain.speed =
+        clamp(Number(event.target.value), 1, 20);
+      elements.rainSpeedVal.textContent =
+        String(state.presetSettings.rain.speed);
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.rainDensity.addEventListener("input", (event) => {
+      state.presetSettings.rain.density =
+        clamp(Number(event.target.value), 1, 100);
+      elements.rainDensityVal.textContent =
+        String(state.presetSettings.rain.density);
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.rainTrail.addEventListener("input", (event) => {
+      state.presetSettings.rain.trail =
+        clamp(Number(event.target.value), 2, 7);
+      elements.rainTrailVal.textContent =
+        String(state.presetSettings.rain.trail);
+      renderRainPreview();
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.firePalette.addEventListener("change", (event) => {
+      state.presetSettings.fire.palette =
+        ["classic", "blue", "purple"].includes(event.target.value)
+          ? event.target.value
+          : "classic";
+      renderFirePreview();
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.fireSpeed.addEventListener("input", (event) => {
+      state.presetSettings.fire.speed =
+        clamp(Number(event.target.value), 1, 20);
+      elements.fireSpeedVal.textContent =
+        String(state.presetSettings.fire.speed);
+      markPresetDirty();
+      saveApplicationState();
+    });
+
+    elements.fireIntensity.addEventListener("input", (event) => {
+      state.presetSettings.fire.intensity =
+        clamp(Number(event.target.value), 1, 100);
+      elements.fireIntensityVal.textContent =
+        String(state.presetSettings.fire.intensity);
+      markPresetDirty();
+      saveApplicationState();
+    });
+
     elements.effect.addEventListener("change", (event) => {
       state.effect = event.target.value;
       syncUI();
@@ -2959,11 +3978,11 @@ elements.bright.addEventListener("input", (event) => {
   renderNeeded = true;
   saveApplicationState();
 
-  if (serialPort?.writable) {
+  if (isPixelBoardConnected()) {
     const hardwareBrightness =
       uiBrightnessToHardware(state.brightness);
 
-    sendSerialCommand(
+    sendCommand(
       `BRIGHTNESS:${hardwareBrightness}`
     );
   }

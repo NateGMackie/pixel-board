@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_system.h>
 #include <FastLED.h>
 
 void showDisplay();
@@ -881,7 +882,17 @@ enum ContentMode
 
 enum PresetId
 {
-    PRESET_SOLID
+    PRESET_SOLID,
+    PRESET_CLOCK,
+    PRESET_RAIN,
+    PRESET_FIRE
+};
+
+enum FirePalette
+{
+    FIRE_CLASSIC,
+    FIRE_BLUE,
+    FIRE_PURPLE
 };
 
 char message[MESSAGE_BUFFER_SIZE] = "HELLO WORLD!";
@@ -890,7 +901,7 @@ char inputBuffer[COMMAND_BUFFER_SIZE];
 int inputIndex = 0;
 
 Color messageColor = WHITE;
-const int TEXT_Y = 1;
+const int TEXT_Y = 0;
 int animationSpeed = 10;
 unsigned long blinkOnMs = 450;
 unsigned long blinkOffMs = 350;
@@ -912,6 +923,26 @@ unsigned long lastBlinkTime = 0;
 
 int brightness = 2;
 Color solidPresetColor = {255, 102, 0};
+Color clockPresetColor = {255, 102, 0};
+Color rainPresetColor = {0, 255, 102};
+bool clockUse24Hour = false;
+bool clockLeadingZero = false;
+bool clockTimeValid = false;
+unsigned long clockSyncMillis = 0;
+unsigned long clockSyncUnixSeconds = 0;
+int clockUtcOffsetMinutes = 0;
+int lastRenderedClockMinute = -1;
+int rainSpeed = 8;
+int rainDensity = 45;
+int rainTrailLength = 4;
+bool rainColumnActive[DISPLAY_WIDTH];
+int rainColumnHead[DISPLAY_WIDTH];
+int rainColumnDelay[DISPLAY_WIDTH];
+FirePalette firePalette = FIRE_CLASSIC;
+int fireSpeed = 10;
+int fireIntensity = 60;
+uint8_t fireHeat[DISPLAY_HEIGHT][DISPLAY_WIDTH];
+unsigned long lastAutonomousTime = 0;
 
 Color activeDrawingFrame[LED_COUNT];
 Color stagingDrawingFrame[LED_COUNT];
@@ -967,15 +998,65 @@ const char *getPresetName()
 {
     switch (activePreset)
     {
+        case PRESET_RAIN:
+            return "RAIN";
+        case PRESET_FIRE:
+            return "FIRE";
+        case PRESET_CLOCK:
+            return "CLOCK";
         case PRESET_SOLID:
         default:
             return "SOLID";
     }
 }
 
+const char *getFirePaletteName()
+{
+    switch (firePalette)
+    {
+        case FIRE_BLUE:
+            return "BLUE";
+        case FIRE_PURPLE:
+            return "PURPLE";
+        case FIRE_CLASSIC:
+        default:
+            return "CLASSIC";
+    }
+}
+
+bool isAutonomousPreset()
+{
+    return activePreset == PRESET_RAIN || activePreset == PRESET_FIRE;
+}
+
+Color scaleColor(Color color, uint8_t scale)
+{
+    return {
+        (color.red * scale) / 255,
+        (color.green * scale) / 255,
+        (color.blue * scale) / 255
+    };
+}
+
+Color blendColor(Color start, Color end, uint8_t amount)
+{
+    return {
+        start.red + ((end.red - start.red) * amount) / 255,
+        start.green + ((end.green - start.green) * amount) / 255,
+        start.blue + ((end.blue - start.blue) * amount) / 255
+    };
+}
+
 unsigned long getAnimationInterval()
 {
     return 1000UL / animationSpeed;
+}
+
+unsigned long getAutonomousInterval()
+{
+    int speed = activePreset == PRESET_FIRE ? fireSpeed : rainSpeed;
+
+    return 1000UL / constrain(speed, 1, 20);
 }
 
 int getCenteredTextX()
@@ -1054,6 +1135,282 @@ int getCenteredContentY()
     return contentMode == MODE_TEXT ? TEXT_Y : 0;
 }
 
+unsigned long getCurrentClockUnixSeconds()
+{
+    unsigned long elapsedSeconds =
+        (millis() - clockSyncMillis) / 1000UL;
+
+    return clockSyncUnixSeconds + elapsedSeconds;
+}
+
+int getCurrentClockMinute()
+{
+    if (!clockTimeValid)
+    {
+        return -1;
+    }
+
+    long localSeconds =
+        (long)(getCurrentClockUnixSeconds() % 86400UL) +
+        (long)clockUtcOffsetMinutes * 60L;
+
+    while (localSeconds < 0)
+    {
+        localSeconds += 86400L;
+    }
+
+    localSeconds %= 86400L;
+
+    return localSeconds / 60;
+}
+
+void formatClockText(char output[], size_t outputSize)
+{
+    if (!clockTimeValid)
+    {
+        strncpy(output, "--:--", outputSize - 1);
+        output[outputSize - 1] = '\0';
+        return;
+    }
+
+    int minuteOfDay = getCurrentClockMinute();
+    int hours = minuteOfDay / 60;
+    int minutes = minuteOfDay % 60;
+
+    if (!clockUse24Hour)
+    {
+        hours %= 12;
+
+        if (hours == 0)
+        {
+            hours = 12;
+        }
+    }
+
+    if (clockLeadingZero)
+    {
+        snprintf(output, outputSize, "%02d:%02d", hours, minutes);
+    }
+    else
+    {
+        snprintf(output, outputSize, "%d:%02d", hours, minutes);
+    }
+}
+
+int getClockTextWidth()
+{
+    char clockText[6];
+    formatClockText(clockText, sizeof(clockText));
+
+    return getTextWidth(clockText);
+}
+
+void drawClockPresetFrame(int startX, int startY)
+{
+    char clockText[6];
+    formatClockText(clockText, sizeof(clockText));
+
+    int x = startX + (DISPLAY_WIDTH - getTextWidth(clockText)) / 2;
+    int y = startY + (DISPLAY_HEIGHT - FONT_HEIGHT) / 2;
+
+    drawText(clockText, x, y, clockPresetColor);
+}
+
+void initializeRainPreset()
+{
+    for (int x = 0; x < DISPLAY_WIDTH; x++)
+    {
+        rainColumnActive[x] = false;
+        rainColumnHead[x] = -1;
+        rainColumnDelay[x] = random(0, DISPLAY_HEIGHT);
+    }
+}
+
+void initializeFirePreset()
+{
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        {
+            fireHeat[y][x] = 0;
+        }
+    }
+}
+
+void renderDigitalRainFrame()
+{
+    clearDisplay();
+
+    for (int x = 0; x < DISPLAY_WIDTH; x++)
+    {
+        if (!rainColumnActive[x])
+        {
+            continue;
+        }
+
+        for (int offset = 0; offset < rainTrailLength; offset++)
+        {
+            int y = rainColumnHead[x] - offset;
+
+            if (y < 0 || y >= DISPLAY_HEIGHT)
+            {
+                continue;
+            }
+
+            Color color = offset == 0
+                ? blendColor(rainPresetColor, WHITE, 140)
+                : scaleColor(
+                    rainPresetColor,
+                    constrain(255 - (offset * 190 / rainTrailLength), 35, 255)
+                );
+
+            setPixel(x, y, color);
+        }
+    }
+
+    showDisplay();
+}
+
+void advanceDigitalRain()
+{
+    for (int x = 0; x < DISPLAY_WIDTH; x++)
+    {
+        if (rainColumnActive[x])
+        {
+            rainColumnHead[x]++;
+
+            if (rainColumnHead[x] - rainTrailLength > DISPLAY_HEIGHT)
+            {
+                rainColumnActive[x] = false;
+                rainColumnDelay[x] = random(0, 8);
+            }
+
+            continue;
+        }
+
+        if (rainColumnDelay[x] > 0)
+        {
+            rainColumnDelay[x]--;
+            continue;
+        }
+
+        if (random(0, 100) < rainDensity)
+        {
+            rainColumnActive[x] = true;
+            rainColumnHead[x] = 0;
+        }
+        else
+        {
+            rainColumnDelay[x] = random(1, 6);
+        }
+    }
+}
+
+Color getFirePaletteColor(uint8_t heat)
+{
+    if (heat < 8)
+    {
+        return BLACK;
+    }
+
+    if (firePalette == FIRE_BLUE)
+    {
+        if (heat < 110)
+        {
+            return blendColor({0, 0, 20}, {0, 64, 255}, heat * 255 / 110);
+        }
+
+        if (heat < 210)
+        {
+            return blendColor({0, 64, 255}, {0, 255, 255}, (heat - 110) * 255 / 100);
+        }
+
+        return blendColor({0, 255, 255}, {216, 247, 255}, (heat - 210) * 255 / 45);
+    }
+
+    if (firePalette == FIRE_PURPLE)
+    {
+        if (heat < 110)
+        {
+            return blendColor({16, 0, 24}, {106, 0, 168}, heat * 255 / 110);
+        }
+
+        if (heat < 210)
+        {
+            return blendColor({106, 0, 168}, {255, 43, 214}, (heat - 110) * 255 / 100);
+        }
+
+        return blendColor({255, 43, 214}, {255, 211, 247}, (heat - 210) * 255 / 45);
+    }
+
+    if (heat < 96)
+    {
+        return blendColor({18, 0, 0}, {204, 24, 0}, heat * 255 / 96);
+    }
+
+    if (heat < 190)
+    {
+        return blendColor({204, 24, 0}, {255, 174, 0}, (heat - 96) * 255 / 94);
+    }
+
+    return blendColor({255, 174, 0}, {255, 240, 184}, (heat - 190) * 255 / 65);
+}
+
+void renderDigitalFireFrame()
+{
+    clearDisplay();
+
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        {
+            setPixel(x, y, getFirePaletteColor(fireHeat[y][x]));
+        }
+    }
+
+    showDisplay();
+}
+
+void advanceDigitalFire()
+{
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        {
+            int cooling = random(18, 52);
+            fireHeat[y][x] = cooling > fireHeat[y][x]
+                ? 0
+                : fireHeat[y][x] - cooling;
+        }
+    }
+
+    for (int y = 0; y < DISPLAY_HEIGHT - 1; y++)
+    {
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        {
+            int below = fireHeat[y + 1][x];
+            int belowLeft = fireHeat[y + 1][x > 0 ? x - 1 : x];
+            int belowRight = fireHeat[y + 1][x < DISPLAY_WIDTH - 1 ? x + 1 : x];
+
+            fireHeat[y][x] = (below * 2 + belowLeft + belowRight) / 4;
+        }
+    }
+
+    int bottom = DISPLAY_HEIGHT - 1;
+
+    for (int x = 0; x < DISPLAY_WIDTH; x++)
+    {
+        if (random(0, 100) < fireIntensity)
+        {
+            fireHeat[bottom][x] = constrain(
+                fireHeat[bottom][x] + random(120, 256),
+                0,
+                255
+            );
+        }
+    }
+}
+
 void drawActiveContent(int startX, int startY)
 {
     if (contentMode == MODE_DRAWING)
@@ -1062,7 +1419,11 @@ void drawActiveContent(int startX, int startY)
     }
     else if (contentMode == MODE_PRESET)
     {
-        if (activePreset == PRESET_SOLID)
+        if (activePreset == PRESET_CLOCK)
+        {
+            drawClockPresetFrame(startX, startY);
+        }
+        else if (activePreset == PRESET_SOLID)
         {
             for (int y = 0; y < DISPLAY_HEIGHT; y++)
             {
@@ -1098,9 +1459,18 @@ void renderActivePreset()
 {
     switch (activePreset)
     {
+        case PRESET_RAIN:
+            renderDigitalRainFrame();
+            break;
+        case PRESET_FIRE:
+            renderDigitalFireFrame();
+            break;
+        case PRESET_CLOCK:
+            renderAnimationFrame();
+            break;
         case PRESET_SOLID:
         default:
-            renderSolidColorPreset();
+            renderAnimationFrame();
             break;
     }
 }
@@ -1120,38 +1490,360 @@ bool setActivePreset(const char value[])
         return true;
     }
 
+    if (strcmp(value, "CLOCK") == 0)
+    {
+        activePreset = PRESET_CLOCK;
+        lastRenderedClockMinute = -2;
+        Serial.println("PRESET:CLOCK");
+
+        if (contentMode == MODE_PRESET)
+        {
+            resetAnimation();
+        }
+
+        return true;
+    }
+
+    if (strcmp(value, "RAIN") == 0)
+    {
+        activePreset = PRESET_RAIN;
+        initializeRainPreset();
+        lastAutonomousTime = millis();
+        Serial.println("PRESET:RAIN");
+
+        if (contentMode == MODE_PRESET)
+        {
+            renderActivePreset();
+        }
+
+        return true;
+    }
+
+    if (strcmp(value, "FIRE") == 0)
+    {
+        activePreset = PRESET_FIRE;
+        initializeFirePreset();
+        lastAutonomousTime = millis();
+        Serial.println("PRESET:FIRE");
+
+        if (contentMode == MODE_PRESET)
+        {
+            renderActivePreset();
+        }
+
+        return true;
+    }
+
     return false;
 }
 
-bool setPresetParameter(const char command[])
+bool parseRgbParameter(
+    const char value[],
+    Color *targetColor)
 {
-    if (strncmp(command, "COLOR:", 6) != 0)
-    {
-        return false;
-    }
-
     int red;
     int green;
     int blue;
 
-    if (sscanf(command + 6, "%d,%d,%d", &red, &green, &blue) != 3)
+    if (sscanf(value, "%d,%d,%d", &red, &green, &blue) != 3)
     {
-        Serial.println("PRESET_PARAM:ERROR:COLOR");
-        return true;
+        return false;
     }
 
     if (red < 0 || red > 255 ||
         green < 0 || green > 255 ||
         blue < 0 || blue > 255)
     {
-        Serial.println("PRESET_PARAM:ERROR:COLOR");
+        return false;
+    }
+
+    *targetColor = {red, green, blue};
+    return true;
+}
+
+bool parseIntegerParameter(
+    const char value[],
+    int minimum,
+    int maximum,
+    int *targetValue)
+{
+    char *end = nullptr;
+    long parsed = strtol(value, &end, 10);
+
+    if (*end != '\0' || parsed < minimum || parsed > maximum)
+    {
+        return false;
+    }
+
+    *targetValue = (int)parsed;
+    return true;
+}
+
+bool setPresetParameter(const char command[])
+{
+    if (strncmp(command, "COLOR:", 6) == 0)
+    {
+        Color color;
+
+        if (!parseRgbParameter(command + 6, &color))
+        {
+            Serial.println("PRESET_PARAM:ERROR:COLOR");
+            return true;
+        }
+
+        solidPresetColor = color;
+        Serial.println("PRESET_PARAM:COLOR:OK");
+
+        if (contentMode == MODE_PRESET && activePreset == PRESET_SOLID)
+        {
+            renderAnimationFrame();
+        }
+
         return true;
     }
 
-    solidPresetColor = {red, green, blue};
-    Serial.println("PRESET_PARAM:COLOR:OK");
+    if (strncmp(command, "CLOCK_COLOR:", 12) == 0)
+    {
+        Color color;
 
-    if (contentMode == MODE_PRESET && activePreset == PRESET_SOLID)
+        if (!parseRgbParameter(command + 12, &color))
+        {
+            Serial.println("PRESET_PARAM:ERROR:CLOCK_COLOR");
+            return true;
+        }
+
+        clockPresetColor = color;
+        Serial.println("PRESET_PARAM:CLOCK_COLOR:OK");
+
+        if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
+        {
+            renderAnimationFrame();
+        }
+
+        return true;
+    }
+
+    if (strncmp(command, "CLOCK_FORMAT:", 13) == 0)
+    {
+        if (strcmp(command + 13, "12") == 0)
+        {
+            clockUse24Hour = false;
+        }
+        else if (strcmp(command + 13, "24") == 0)
+        {
+            clockUse24Hour = true;
+        }
+        else
+        {
+            Serial.println("PRESET_PARAM:ERROR:CLOCK_FORMAT");
+            return true;
+        }
+
+        lastRenderedClockMinute = -2;
+        Serial.println("PRESET_PARAM:CLOCK_FORMAT:OK");
+
+        if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
+        {
+            renderAnimationFrame();
+        }
+
+        return true;
+    }
+
+    if (strncmp(command, "CLOCK_LEADING_ZERO:", 19) == 0)
+    {
+        if (strcmp(command + 19, "1") == 0)
+        {
+            clockLeadingZero = true;
+        }
+        else if (strcmp(command + 19, "0") == 0)
+        {
+            clockLeadingZero = false;
+        }
+        else
+        {
+            Serial.println("PRESET_PARAM:ERROR:CLOCK_LEADING_ZERO");
+            return true;
+        }
+
+        lastRenderedClockMinute = -2;
+        Serial.println("PRESET_PARAM:CLOCK_LEADING_ZERO:OK");
+
+        if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
+        {
+            renderAnimationFrame();
+        }
+
+        return true;
+    }
+
+    if (strncmp(command, "RAIN_COLOR:", 11) == 0)
+    {
+        Color color;
+
+        if (!parseRgbParameter(command + 11, &color))
+        {
+            Serial.println("PRESET_PARAM:ERROR:RAIN_COLOR");
+            return true;
+        }
+
+        rainPresetColor = color;
+        Serial.println("PRESET_PARAM:RAIN_COLOR:OK");
+
+        if (contentMode == MODE_PRESET && activePreset == PRESET_RAIN)
+        {
+            renderActivePreset();
+        }
+
+        return true;
+    }
+
+    if (strncmp(command, "RAIN_SPEED:", 11) == 0)
+    {
+        if (!parseIntegerParameter(command + 11, 1, 20, &rainSpeed))
+        {
+            Serial.println("PRESET_PARAM:ERROR:RAIN_SPEED");
+            return true;
+        }
+
+        lastAutonomousTime = millis();
+        Serial.println("PRESET_PARAM:RAIN_SPEED:OK");
+        return true;
+    }
+
+    if (strncmp(command, "RAIN_DENSITY:", 13) == 0)
+    {
+        if (!parseIntegerParameter(command + 13, 1, 100, &rainDensity))
+        {
+            Serial.println("PRESET_PARAM:ERROR:RAIN_DENSITY");
+            return true;
+        }
+
+        Serial.println("PRESET_PARAM:RAIN_DENSITY:OK");
+        return true;
+    }
+
+    if (strncmp(command, "RAIN_TRAIL:", 11) == 0)
+    {
+        if (!parseIntegerParameter(command + 11, 2, 7, &rainTrailLength))
+        {
+            Serial.println("PRESET_PARAM:ERROR:RAIN_TRAIL");
+            return true;
+        }
+
+        Serial.println("PRESET_PARAM:RAIN_TRAIL:OK");
+
+        if (contentMode == MODE_PRESET && activePreset == PRESET_RAIN)
+        {
+            renderActivePreset();
+        }
+
+        return true;
+    }
+
+    if (strncmp(command, "FIRE_PALETTE:", 13) == 0)
+    {
+        if (strcmp(command + 13, "CLASSIC") == 0)
+        {
+            firePalette = FIRE_CLASSIC;
+        }
+        else if (strcmp(command + 13, "BLUE") == 0)
+        {
+            firePalette = FIRE_BLUE;
+        }
+        else if (strcmp(command + 13, "PURPLE") == 0)
+        {
+            firePalette = FIRE_PURPLE;
+        }
+        else
+        {
+            Serial.println("PRESET_PARAM:ERROR:FIRE_PALETTE");
+            return true;
+        }
+
+        Serial.println("PRESET_PARAM:FIRE_PALETTE:OK");
+
+        if (contentMode == MODE_PRESET && activePreset == PRESET_FIRE)
+        {
+            renderActivePreset();
+        }
+
+        return true;
+    }
+
+    if (strncmp(command, "FIRE_SPEED:", 11) == 0)
+    {
+        if (!parseIntegerParameter(command + 11, 1, 20, &fireSpeed))
+        {
+            Serial.println("PRESET_PARAM:ERROR:FIRE_SPEED");
+            return true;
+        }
+
+        lastAutonomousTime = millis();
+        Serial.println("PRESET_PARAM:FIRE_SPEED:OK");
+        return true;
+    }
+
+    if (strncmp(command, "FIRE_INTENSITY:", 15) == 0)
+    {
+        if (!parseIntegerParameter(command + 15, 1, 100, &fireIntensity))
+        {
+            Serial.println("PRESET_PARAM:ERROR:FIRE_INTENSITY");
+            return true;
+        }
+
+        Serial.println("PRESET_PARAM:FIRE_INTENSITY:OK");
+        return true;
+    }
+
+    return false;
+}
+
+bool setClockTime(const char command[])
+{
+    const char *separator = strchr(command, ':');
+
+    if (separator == nullptr || separator == command || *(separator + 1) == '\0')
+    {
+        return false;
+    }
+
+    char timestampText[16];
+    size_t timestampLength = separator - command;
+
+    if (timestampLength >= sizeof(timestampText))
+    {
+        return false;
+    }
+
+    strncpy(timestampText, command, timestampLength);
+    timestampText[timestampLength] = '\0';
+
+    char *timestampEnd = nullptr;
+    unsigned long unixSeconds = strtoul(timestampText, &timestampEnd, 10);
+
+    if (*timestampEnd != '\0' || unixSeconds == 0)
+    {
+        return false;
+    }
+
+    char *offsetEnd = nullptr;
+    long offsetMinutes = strtol(separator + 1, &offsetEnd, 10);
+
+    if (*offsetEnd != '\0' || offsetMinutes < -840 || offsetMinutes > 840)
+    {
+        return false;
+    }
+
+    clockSyncUnixSeconds = unixSeconds;
+    clockSyncMillis = millis();
+    clockUtcOffsetMinutes = (int)offsetMinutes;
+    clockTimeValid = true;
+    lastRenderedClockMinute = getCurrentClockMinute();
+
+    Serial.println("CLOCK_TIME:OK");
+
+    if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
     {
         renderAnimationFrame();
     }
@@ -1375,6 +2067,12 @@ void maskWipeFrame()
 
 void renderAnimationFrame()
 {
+    if (contentMode == MODE_PRESET && isAutonomousPreset())
+    {
+        renderActivePreset();
+        return;
+    }
+
     clearDisplay();
 
     if (animationEffect == EFFECT_SCROLL)
@@ -1409,6 +2107,13 @@ void renderAnimationFrame()
 
 void resetAnimation()
 {
+    if (contentMode == MODE_PRESET && isAutonomousPreset())
+    {
+        lastAutonomousTime = millis();
+        renderActivePreset();
+        return;
+    }
+
     textWidth = getTextWidth(message);
     int contentWidth = getContentWidth();
     int contentHeight = getContentHeight();
@@ -1471,6 +2176,47 @@ void printStatus()
     Serial.print(",");
     Serial.print(solidPresetColor.blue);
 
+    Serial.print(";CLOCK_COLOR=");
+    Serial.print(clockPresetColor.red);
+    Serial.print(",");
+    Serial.print(clockPresetColor.green);
+    Serial.print(",");
+    Serial.print(clockPresetColor.blue);
+
+    Serial.print(";CLOCK_FORMAT=");
+    Serial.print(clockUse24Hour ? 24 : 12);
+
+    Serial.print(";CLOCK_LEADING_ZERO=");
+    Serial.print(clockLeadingZero ? 1 : 0);
+
+    Serial.print(";CLOCK_VALID=");
+    Serial.print(clockTimeValid ? 1 : 0);
+
+    Serial.print(";RAIN_COLOR=");
+    Serial.print(rainPresetColor.red);
+    Serial.print(",");
+    Serial.print(rainPresetColor.green);
+    Serial.print(",");
+    Serial.print(rainPresetColor.blue);
+
+    Serial.print(";RAIN_SPEED=");
+    Serial.print(rainSpeed);
+
+    Serial.print(";RAIN_DENSITY=");
+    Serial.print(rainDensity);
+
+    Serial.print(";RAIN_TRAIL=");
+    Serial.print(rainTrailLength);
+
+    Serial.print(";FIRE_PALETTE=");
+    Serial.print(getFirePaletteName());
+
+    Serial.print(";FIRE_SPEED=");
+    Serial.print(fireSpeed);
+
+    Serial.print(";FIRE_INTENSITY=");
+    Serial.print(fireIntensity);
+
     Serial.print(";SPEED=");
     Serial.print(animationSpeed);
 
@@ -1499,8 +2245,19 @@ void printHelp()
     Serial.println("Available commands:");
     Serial.println("MESSAGE:<text>");
     Serial.println("MODE:TEXT|DRAWING|PRESET");
-    Serial.println("PRESET:SOLID");
+    Serial.println("PRESET:SOLID|CLOCK|RAIN|FIRE");
     Serial.println("PRESET_PARAM:COLOR:<red>,<green>,<blue>");
+    Serial.println("PRESET_PARAM:CLOCK_COLOR:<red>,<green>,<blue>");
+    Serial.println("PRESET_PARAM:CLOCK_FORMAT:12|24");
+    Serial.println("PRESET_PARAM:CLOCK_LEADING_ZERO:0|1");
+    Serial.println("PRESET_PARAM:RAIN_COLOR:<red>,<green>,<blue>");
+    Serial.println("PRESET_PARAM:RAIN_SPEED:<1-20>");
+    Serial.println("PRESET_PARAM:RAIN_DENSITY:<1-100>");
+    Serial.println("PRESET_PARAM:RAIN_TRAIL:<2-7>");
+    Serial.println("PRESET_PARAM:FIRE_PALETTE:CLASSIC|BLUE|PURPLE");
+    Serial.println("PRESET_PARAM:FIRE_SPEED:<1-20>");
+    Serial.println("PRESET_PARAM:FIRE_INTENSITY:<1-100>");
+    Serial.println("CLOCK_TIME:<unix seconds>:<offset minutes east of UTC>");
     Serial.println("EFFECT:STILL|SCROLL|WIPE|BLINK");
     Serial.println("DIRECTION:LEFT|RIGHT|UP|DOWN");
     Serial.println("SPEED:<pixels per second, 1-30>");
@@ -1578,6 +2335,50 @@ void advanceWipe()
 
 void updateAnimation()
 {
+    if (contentMode == MODE_PRESET && isAutonomousPreset())
+    {
+        unsigned long currentTime = millis();
+        unsigned long interval = getAutonomousInterval();
+
+        if (currentTime - lastAutonomousTime < interval)
+        {
+            return;
+        }
+
+        lastAutonomousTime += interval;
+
+        if (currentTime - lastAutonomousTime > interval * 4)
+        {
+            lastAutonomousTime = currentTime;
+        }
+
+        if (activePreset == PRESET_RAIN)
+        {
+            advanceDigitalRain();
+        }
+        else
+        {
+            advanceDigitalFire();
+        }
+
+        renderActivePreset();
+        return;
+    }
+
+    if (contentMode == MODE_PRESET &&
+        activePreset == PRESET_CLOCK &&
+        clockTimeValid &&
+        !animationPaused)
+    {
+        int currentClockMinute = getCurrentClockMinute();
+
+        if (currentClockMinute != lastRenderedClockMinute)
+        {
+            lastRenderedClockMinute = currentClockMinute;
+            renderAnimationFrame();
+        }
+    }
+
     if (animationPaused ||
         animationEffect == EFFECT_STILL)
     {
@@ -1724,14 +2525,21 @@ void processCommand(const char command[])
     {
         if (!setPresetParameter(command + 13))
         {
-            Serial.println("Use PRESET_PARAM:COLOR:red,green,blue");
+            Serial.println("Use PRESET_PARAM:COLOR|CLOCK|RAIN|FIRE setting");
         }
     }
     else if (strncmp(command, "PRESET:", 7) == 0)
     {
         if (!setActivePreset(command + 7))
         {
-            Serial.println("Use PRESET:SOLID");
+            Serial.println("Use PRESET:SOLID|CLOCK|RAIN|FIRE");
+        }
+    }
+    else if (strncmp(command, "CLOCK_TIME:", 11) == 0)
+    {
+        if (!setClockTime(command + 11))
+        {
+            Serial.println("Use CLOCK_TIME:unixSeconds:offsetMinutesEastOfUtc");
         }
     }
     else if (strncmp(command, "FRAME_BEGIN:", 12) == 0)
@@ -2009,6 +2817,7 @@ void printPixel(int index)
 void setup()
 {
     Serial.begin(115200);
+    randomSeed(esp_random());
 
     FastLED.addLeds<WS2812B, DATA_PIN, GRB>(
         physicalLeds,
@@ -2020,6 +2829,8 @@ void setup()
     clearDrawingFrame(activeDrawingFrame);
     clearDrawingFrame(stagingDrawingFrame);
     clearStagingRows();
+    initializeRainPreset();
+    initializeFirePreset();
 
     clearDisplay();
     showDisplay();
