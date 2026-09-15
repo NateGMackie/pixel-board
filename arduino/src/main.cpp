@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <esp_system.h>
+#include <ESPmDNS.h>
 #include <FastLED.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
@@ -13,6 +15,8 @@ void resetAnimation();
 void renderAnimationFrame();
 void processCommand(const char command[]);
 void sendProtocolLine(const String &line);
+bool isHexCharacter(char character);
+int hexValue(char character);
 
 // -------------------------
 // Display Configuration
@@ -29,6 +33,7 @@ const char PIXEL_BOARD_AP_PASSWORD[] = "PixelBoard123";
 CRGB physicalLeds[LED_COUNT];
 WebServer httpServer(80);
 WebSocketsServer webSocket(81);
+Preferences wifiPreferences;
 
 // -------------------------
 // Color
@@ -906,6 +911,15 @@ enum FirePalette
     FIRE_PURPLE
 };
 
+enum StationState
+{
+    STA_NOT_CONFIGURED,
+    STA_CONNECTING,
+    STA_CONNECTED,
+    STA_FAILED,
+    STA_UNAVAILABLE
+};
+
 char message[MESSAGE_BUFFER_SIZE] = "HELLO WORLD!";
 char inputBuffer[COMMAND_BUFFER_SIZE];
 
@@ -959,6 +973,20 @@ Color activeDrawingFrame[LED_COUNT];
 Color stagingDrawingFrame[LED_COUNT];
 bool stagingRowsReceived[DISPLAY_HEIGHT];
 bool receivingFrame = false;
+String apSsid;
+String deviceHostname;
+String savedStationSsid;
+String savedStationPassword;
+String pendingStationSsid;
+String pendingStationPassword;
+StationState stationState = STA_NOT_CONFIGURED;
+bool stationConfigured = false;
+bool pendingCredentialSave = false;
+bool scanInProgress = false;
+unsigned long stationConnectStartedAt = 0;
+unsigned long nextStationRetryAt = 0;
+const unsigned long STATION_CONNECT_TIMEOUT_MS = 20000;
+const unsigned long STATION_RETRY_INTERVAL_MS = 30000;
 
 void sendProtocolLine(const String &line)
 {
@@ -972,6 +1000,70 @@ void sendProtocolLine(const char line[])
     sendProtocolLine(String(line));
 }
 
+bool isUnreservedUrlByte(char value)
+{
+    return
+        (value >= 'A' && value <= 'Z') ||
+        (value >= 'a' && value <= 'z') ||
+        (value >= '0' && value <= '9') ||
+        value == '-' ||
+        value == '_' ||
+        value == '.' ||
+        value == '~';
+}
+
+String percentEncode(const String &value)
+{
+    const char hex[] = "0123456789ABCDEF";
+    String encoded;
+
+    for (size_t i = 0; i < value.length(); i++)
+    {
+        unsigned char byte = value[i];
+
+        if (isUnreservedUrlByte(byte))
+        {
+            encoded += (char)byte;
+        }
+        else
+        {
+            encoded += "%";
+            encoded += hex[(byte >> 4) & 0x0F];
+            encoded += hex[byte & 0x0F];
+        }
+    }
+
+    return encoded;
+}
+
+bool percentDecode(const char input[], String *decoded)
+{
+    decoded->remove(0);
+
+    for (size_t i = 0; input[i] != '\0'; i++)
+    {
+        if (input[i] == '%')
+        {
+            if (!isHexCharacter(input[i + 1]) || !isHexCharacter(input[i + 2]))
+            {
+                return false;
+            }
+
+            char value =
+                (hexValue(input[i + 1]) << 4) +
+                hexValue(input[i + 2]);
+            *decoded += value;
+            i += 2;
+        }
+        else
+        {
+            *decoded += input[i];
+        }
+    }
+
+    return true;
+}
+
 String getAccessPointSsid()
 {
     uint64_t mac = ESP.getEfuseMac();
@@ -980,6 +1072,335 @@ String getAccessPointSsid()
     snprintf(suffix, sizeof(suffix), "%04X", (uint16_t)(mac & 0xFFFF));
 
     return String("PixelBoard-") + suffix;
+}
+
+String getDeviceHostname()
+{
+    String ssid = getAccessPointSsid();
+    String suffix = ssid.substring(ssid.length() - 4);
+
+    suffix.toLowerCase();
+    return String("pixelboard-") + suffix;
+}
+
+const char *getStationStateName()
+{
+    switch (stationState)
+    {
+        case STA_CONNECTING:
+            return "CONNECTING";
+        case STA_CONNECTED:
+            return "CONNECTED";
+        case STA_FAILED:
+            return "FAILED";
+        case STA_UNAVAILABLE:
+            return "UNAVAILABLE";
+        case STA_NOT_CONFIGURED:
+        default:
+            return "NOT_CONFIGURED";
+    }
+}
+
+void sendNetworkStatus()
+{
+    String status = "NET_STATUS:AP_SSID=";
+
+    status += percentEncode(apSsid);
+    status += ";AP_IP=";
+    status += WiFi.softAPIP().toString();
+    status += ";STA_CONFIGURED=";
+    status += (stationConfigured ? 1 : 0);
+    status += ";STA_STATUS=";
+    status += getStationStateName();
+    status += ";STA_SSID=";
+    status += (stationConfigured ? percentEncode(savedStationSsid) : "");
+    status += ";STA_IP=";
+    status += (stationState == STA_CONNECTED ? WiFi.localIP().toString() : "");
+    status += ";STA_RSSI=";
+    status += (stationState == STA_CONNECTED ? WiFi.RSSI() : 0);
+    status += ";HOSTNAME=";
+    status += deviceHostname;
+    status += ".local";
+
+    sendProtocolLine(status);
+}
+
+void loadSavedStationCredentials()
+{
+    wifiPreferences.begin("pixel-wifi", false);
+    stationConfigured = wifiPreferences.getBool("configured", false);
+
+    if (stationConfigured)
+    {
+        savedStationSsid = wifiPreferences.getString("ssid", "");
+        savedStationPassword = wifiPreferences.getString("password", "");
+        stationConfigured = savedStationSsid.length() > 0;
+    }
+
+    if (!stationConfigured)
+    {
+        savedStationSsid = "";
+        savedStationPassword = "";
+        stationState = STA_NOT_CONFIGURED;
+    }
+}
+
+void saveStationCredentials(const String &ssid, const String &password)
+{
+    wifiPreferences.putString("ssid", ssid);
+    wifiPreferences.putString("password", password);
+    wifiPreferences.putBool("configured", true);
+    savedStationSsid = ssid;
+    savedStationPassword = password;
+    stationConfigured = true;
+}
+
+void forgetStationCredentials()
+{
+    wifiPreferences.remove("ssid");
+    wifiPreferences.remove("password");
+    wifiPreferences.putBool("configured", false);
+    savedStationSsid = "";
+    savedStationPassword = "";
+    pendingStationSsid = "";
+    pendingStationPassword = "";
+    stationConfigured = false;
+    pendingCredentialSave = false;
+    stationState = STA_NOT_CONFIGURED;
+    nextStationRetryAt = 0;
+    WiFi.disconnect(false, false);
+    sendProtocolLine("NET_FORGET:OK");
+    sendNetworkStatus();
+}
+
+void beginStationConnection(
+    const String &ssid,
+    const String &password,
+    bool saveOnSuccess)
+{
+    if (ssid.length() == 0 || ssid.length() > 32 || password.length() > 63)
+    {
+        sendProtocolLine("NET_CONNECT:ERROR:INVALID_CREDENTIALS");
+        return;
+    }
+
+    pendingStationSsid = ssid;
+    pendingStationPassword = password;
+    pendingCredentialSave = saveOnSuccess;
+    stationState = STA_CONNECTING;
+    stationConnectStartedAt = millis();
+    nextStationRetryAt = 0;
+    WiFi.disconnect(false, false);
+    WiFi.begin(ssid.c_str(), password.c_str());
+    sendProtocolLine("NET_CONNECT:CONNECTING");
+    sendNetworkStatus();
+}
+
+void beginSavedStationConnection()
+{
+    if (!stationConfigured)
+    {
+        stationState = STA_NOT_CONFIGURED;
+        return;
+    }
+
+    beginStationConnection(savedStationSsid, savedStationPassword, false);
+}
+
+void startNetworkScan()
+{
+    if (scanInProgress)
+    {
+        sendProtocolLine("NET_SCAN:BUSY");
+        return;
+    }
+
+    int result = WiFi.scanNetworks(true, false);
+
+    if (result == WIFI_SCAN_RUNNING)
+    {
+        scanInProgress = true;
+        sendProtocolLine("NET_SCAN:STARTED");
+    }
+    else
+    {
+        sendProtocolLine("NET_SCAN:ERROR");
+    }
+}
+
+void publishNetworkScanResults(int networkCount)
+{
+    sendProtocolLine("NET_SCAN:BEGIN");
+
+    const int maxNetworks = 64;
+    int safeNetworkCount = min(networkCount, maxNetworks);
+    bool emitted[maxNetworks];
+
+    for (int i = 0; i < safeNetworkCount; i++)
+    {
+        emitted[i] = false;
+    }
+
+    for (int emittedCount = 0; emittedCount < safeNetworkCount; emittedCount++)
+    {
+        int bestIndex = -1;
+        int bestRssi = -1000;
+
+        for (int i = 0; i < safeNetworkCount; i++)
+        {
+            if (emitted[i])
+            {
+                continue;
+            }
+
+            String ssid = WiFi.SSID(i);
+
+            if (ssid.length() == 0)
+            {
+                emitted[i] = true;
+                continue;
+            }
+
+            bool duplicate = false;
+
+            for (int previous = 0; previous < safeNetworkCount; previous++)
+            {
+                if (previous != i && emitted[previous] && WiFi.SSID(previous) == ssid)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (duplicate)
+            {
+                emitted[i] = true;
+                continue;
+            }
+
+            int rssi = WiFi.RSSI(i);
+
+            if (bestIndex == -1 || rssi > bestRssi)
+            {
+                bestIndex = i;
+                bestRssi = rssi;
+            }
+        }
+
+        if (bestIndex == -1)
+        {
+            break;
+        }
+
+        emitted[bestIndex] = true;
+
+        String line = "NET_SCAN:ITEM:";
+        line += percentEncode(WiFi.SSID(bestIndex));
+        line += ":";
+        line += WiFi.RSSI(bestIndex);
+        line += ":";
+        line += (WiFi.encryptionType(bestIndex) == WIFI_AUTH_OPEN ? 0 : 1);
+
+        sendProtocolLine(line);
+    }
+
+    sendProtocolLine("NET_SCAN:END");
+    WiFi.scanDelete();
+}
+
+void updateNetworkScan()
+{
+    if (!scanInProgress)
+    {
+        return;
+    }
+
+    int result = WiFi.scanComplete();
+
+    if (result == WIFI_SCAN_RUNNING)
+    {
+        return;
+    }
+
+    scanInProgress = false;
+
+    if (result < 0)
+    {
+        sendProtocolLine("NET_SCAN:ERROR");
+        return;
+    }
+
+    publishNetworkScanResults(result);
+}
+
+void updateStationConnection()
+{
+    wl_status_t wifiStatus = WiFi.status();
+    unsigned long currentTime = millis();
+
+    if (stationState == STA_CONNECTING)
+    {
+        if (wifiStatus == WL_CONNECTED)
+        {
+            if (pendingCredentialSave)
+            {
+                saveStationCredentials(pendingStationSsid, pendingStationPassword);
+            }
+
+            stationState = STA_CONNECTED;
+            pendingCredentialSave = false;
+            pendingStationSsid = "";
+            pendingStationPassword = "";
+            sendProtocolLine("NET_CONNECT:CONNECTED");
+            sendNetworkStatus();
+            Serial.print("Pixel Board station IP: ");
+            Serial.println(WiFi.localIP());
+            Serial.print("Pixel Board hostname: ");
+            Serial.print(deviceHostname);
+            Serial.println(".local");
+            return;
+        }
+
+        if (currentTime - stationConnectStartedAt >= STATION_CONNECT_TIMEOUT_MS)
+        {
+            bool wasCandidate = pendingCredentialSave;
+
+            WiFi.disconnect(false, false);
+            pendingCredentialSave = false;
+            pendingStationSsid = "";
+            pendingStationPassword = "";
+            stationState = stationConfigured ? STA_UNAVAILABLE : STA_FAILED;
+            nextStationRetryAt = currentTime + STATION_RETRY_INTERVAL_MS;
+            sendProtocolLine(wasCandidate
+                ? "NET_CONNECT:ERROR:FAILED"
+                : "NET_CONNECT:UNAVAILABLE");
+            sendNetworkStatus();
+
+            if (wasCandidate && stationConfigured)
+            {
+                nextStationRetryAt = currentTime + 3000;
+            }
+        }
+
+        return;
+    }
+
+    if (stationState == STA_CONNECTED && wifiStatus != WL_CONNECTED)
+    {
+        stationState = STA_UNAVAILABLE;
+        nextStationRetryAt = currentTime + STATION_RETRY_INTERVAL_MS;
+        sendNetworkStatus();
+        return;
+    }
+
+    if (
+        stationConfigured &&
+        stationState != STA_CONNECTING &&
+        stationState != STA_CONNECTED &&
+        currentTime >= nextStationRetryAt)
+    {
+        beginSavedStationConnection();
+    }
 }
 
 void handleWebAppRequest()
@@ -1025,14 +1446,6 @@ void handleWebSocketEvent(
         memcpy(command, payload, length);
         command[length] = '\0';
 
-        for (size_t i = 0; command[i] != '\0'; i++)
-        {
-            if (command[i] >= 'a' && command[i] <= 'z')
-            {
-                command[i] = command[i] - 'a' + 'A';
-            }
-        }
-
         processCommand(command);
         return;
     }
@@ -1045,13 +1458,14 @@ void handleWebSocketEvent(
 
 void startWirelessServices()
 {
-    String ssid = getAccessPointSsid();
+    apSsid = getAccessPointSsid();
+    deviceHostname = getDeviceHostname();
 
-    WiFi.mode(WIFI_AP);
-    bool apStarted = WiFi.softAP(ssid.c_str(), PIXEL_BOARD_AP_PASSWORD);
+    WiFi.mode(WIFI_AP_STA);
+    bool apStarted = WiFi.softAP(apSsid.c_str(), PIXEL_BOARD_AP_PASSWORD);
 
     Serial.print("Pixel Board AP SSID: ");
-    Serial.println(ssid);
+    Serial.println(apSsid);
     Serial.print("Pixel Board AP IP: ");
     Serial.println(WiFi.softAPIP());
     Serial.println("Pixel Board URL: http://192.168.4.1/");
@@ -1066,6 +1480,28 @@ void startWirelessServices()
     webSocket.begin();
     webSocket.onEvent(handleWebSocketEvent);
     Serial.println("WebSocket server started: yes");
+
+    if (MDNS.begin(deviceHostname.c_str()))
+    {
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addService("ws", "tcp", 81);
+        Serial.print("Pixel Board hostname: ");
+        Serial.print(deviceHostname);
+        Serial.println(".local");
+    }
+    else
+    {
+        Serial.println("mDNS started: no");
+    }
+
+    loadSavedStationCredentials();
+
+    if (stationConfigured)
+    {
+        beginSavedStationConnection();
+    }
+
+    sendNetworkStatus();
 }
 
 const char *getEffectName()
@@ -2333,6 +2769,23 @@ void printStatus()
     status += messageColor.blue;
     status += ";BRIGHTNESS=";
     status += brightness;
+    status += ";AP_SSID=";
+    status += percentEncode(apSsid);
+    status += ";AP_IP=";
+    status += WiFi.softAPIP().toString();
+    status += ";STA_CONFIGURED=";
+    status += (stationConfigured ? 1 : 0);
+    status += ";STA_STATUS=";
+    status += getStationStateName();
+    status += ";STA_SSID=";
+    status += (stationConfigured ? percentEncode(savedStationSsid) : "");
+    status += ";STA_IP=";
+    status += (stationState == STA_CONNECTED ? WiFi.localIP().toString() : "");
+    status += ";STA_RSSI=";
+    status += (stationState == STA_CONNECTED ? WiFi.RSSI() : 0);
+    status += ";HOSTNAME=";
+    status += deviceHostname;
+    status += ".local";
 
     sendProtocolLine(status);
 }
@@ -2363,6 +2816,10 @@ void printHelp()
     sendProtocolLine("PAUSED:0|1");
     sendProtocolLine("COLOR:<red>,<green>,<blue>");
     sendProtocolLine("BRIGHTNESS:<0-255>");
+    sendProtocolLine("NET_STATUS");
+    sendProtocolLine("NET_SCAN");
+    sendProtocolLine("NET_CONNECT:<encoded ssid>:<encoded password>");
+    sendProtocolLine("NET_FORGET");
     sendProtocolLine("FRAME_BEGIN:32x8");
     sendProtocolLine("ROW:<0-7>:<192 hex characters>");
     sendProtocolLine("FRAME_END");
@@ -2530,6 +2987,15 @@ void setMarqueeMessage(const char newMessage[])
 {
     strncpy(message, newMessage, MESSAGE_BUFFER_SIZE - 1);
     message[MESSAGE_BUFFER_SIZE - 1] = '\0';
+
+    for (int i = 0; message[i] != '\0'; i++)
+    {
+        if (message[i] >= 'a' && message[i] <= 'z')
+        {
+            message[i] -= 32;
+        }
+    }
+
     contentMode = MODE_TEXT;
     resetAnimation();
 
@@ -2592,67 +3058,127 @@ bool setAnimationDirection(const char value[])
 
 void processCommand(const char command[])
 {
-    if (strncmp(command, "MESSAGE:", 8) == 0)
+    char normalized[COMMAND_BUFFER_SIZE];
+
+    strncpy(normalized, command, COMMAND_BUFFER_SIZE - 1);
+    normalized[COMMAND_BUFFER_SIZE - 1] = '\0';
+
+    for (int i = 0; normalized[i] != '\0'; i++)
+    {
+        if (normalized[i] >= 'a' && normalized[i] <= 'z')
+        {
+            normalized[i] = normalized[i] - 'a' + 'A';
+        }
+    }
+
+    if (strncmp(normalized, "NET_CONNECT:", 12) == 0)
+    {
+        const char *payload = command + 12;
+        const char *separator = strchr(payload, ':');
+
+        if (separator == nullptr)
+        {
+            sendProtocolLine("NET_CONNECT:ERROR:FORMAT");
+            return;
+        }
+
+        char encodedSsid[160];
+        size_t ssidLength = separator - payload;
+
+        if (ssidLength == 0 || ssidLength >= sizeof(encodedSsid))
+        {
+            sendProtocolLine("NET_CONNECT:ERROR:FORMAT");
+            return;
+        }
+
+        strncpy(encodedSsid, payload, ssidLength);
+        encodedSsid[ssidLength] = '\0';
+
+        String ssid;
+        String password;
+
+        if (!percentDecode(encodedSsid, &ssid) ||
+            !percentDecode(separator + 1, &password))
+        {
+            sendProtocolLine("NET_CONNECT:ERROR:ENCODING");
+            return;
+        }
+
+        beginStationConnection(ssid, password, true);
+    }
+    else if (strcmp(normalized, "NET_SCAN") == 0)
+    {
+        startNetworkScan();
+    }
+    else if (strcmp(normalized, "NET_STATUS") == 0)
+    {
+        sendNetworkStatus();
+    }
+    else if (strcmp(normalized, "NET_FORGET") == 0)
+    {
+        forgetStationCredentials();
+    }
+    else if (strncmp(normalized, "MESSAGE:", 8) == 0)
     {
         setMarqueeMessage(command + 8);
     }
-    else if (strncmp(command, "EFFECT:", 7) == 0)
+    else if (strncmp(normalized, "EFFECT:", 7) == 0)
     {
-        if (!setAnimationEffect(command + 7))
+        if (!setAnimationEffect(normalized + 7))
         {
             sendProtocolLine("Use EFFECT:STILL|SCROLL|WIPE|BLINK");
         }
     }
-    else if (strncmp(command, "DIRECTION:", 10) == 0)
+    else if (strncmp(normalized, "DIRECTION:", 10) == 0)
     {
-        if (!setAnimationDirection(command + 10))
+        if (!setAnimationDirection(normalized + 10))
         {
             sendProtocolLine("Use DIRECTION:LEFT|RIGHT|UP|DOWN");
         }
     }
-    else if (strncmp(command, "MODE:", 5) == 0)
+    else if (strncmp(normalized, "MODE:", 5) == 0)
     {
-        if (!setContentMode(command + 5))
+        if (!setContentMode(normalized + 5))
         {
             sendProtocolLine("Use MODE:TEXT|DRAWING|PRESET");
         }
     }
-    else if (strncmp(command, "PRESET_PARAM:", 13) == 0)
+    else if (strncmp(normalized, "PRESET_PARAM:", 13) == 0)
     {
-        if (!setPresetParameter(command + 13))
+        if (!setPresetParameter(normalized + 13))
         {
             sendProtocolLine("Use PRESET_PARAM:COLOR|CLOCK|RAIN|FIRE setting");
         }
     }
-    else if (strncmp(command, "PRESET:", 7) == 0)
+    else if (strncmp(normalized, "PRESET:", 7) == 0)
     {
-        if (!setActivePreset(command + 7))
+        if (!setActivePreset(normalized + 7))
         {
             sendProtocolLine("Use PRESET:SOLID|CLOCK|RAIN|FIRE");
         }
     }
-    else if (strncmp(command, "CLOCK_TIME:", 11) == 0)
+    else if (strncmp(normalized, "CLOCK_TIME:", 11) == 0)
     {
-        if (!setClockTime(command + 11))
+        if (!setClockTime(normalized + 11))
         {
             sendProtocolLine("Use CLOCK_TIME:unixSeconds:offsetMinutesEastOfUtc");
         }
     }
-    else if (strncmp(command, "FRAME_BEGIN:", 12) == 0)
+    else if (strncmp(normalized, "FRAME_BEGIN:", 12) == 0)
     {
-        beginFrameTransfer(command + 12);
+        beginFrameTransfer(normalized + 12);
     }
-    else if (strncmp(command, "ROW:", 4) == 0)
+    else if (strncmp(normalized, "ROW:", 4) == 0)
     {
-        storeFrameRow(command);
+        storeFrameRow(normalized);
     }
-    else if (strcmp(command, "FRAME_END") == 0)
+    else if (strcmp(normalized, "FRAME_END") == 0)
     {
         endFrameTransfer();
     }
-    else if (strncmp(command, "SPEED:", 6) == 0)
+    else if (strncmp(normalized, "SPEED:", 6) == 0)
     {
-        int newSpeed = atoi(command + 6);
+        int newSpeed = atoi(normalized + 6);
 
         if (newSpeed >= 1 && newSpeed <= 30)
         {
@@ -2666,9 +3192,9 @@ void processCommand(const char command[])
             sendProtocolLine("Speed must be 1-30 pixels per second.");
         }
     }
-    else if (strncmp(command, "BLINK_ON:", 9) == 0)
+    else if (strncmp(normalized, "BLINK_ON:", 9) == 0)
     {
-        unsigned long newDuration = strtoul(command + 9, nullptr, 10);
+        unsigned long newDuration = strtoul(normalized + 9, nullptr, 10);
 
         if (newDuration >= 100 && newDuration <= 1200)
         {
@@ -2680,9 +3206,9 @@ void processCommand(const char command[])
             sendProtocolLine("Blink-on duration must be 100-1200 milliseconds.");
         }
     }
-    else if (strncmp(command, "BLINK_OFF:", 10) == 0)
+    else if (strncmp(normalized, "BLINK_OFF:", 10) == 0)
     {
-        unsigned long newDuration = strtoul(command + 10, nullptr, 10);
+        unsigned long newDuration = strtoul(normalized + 10, nullptr, 10);
 
         if (newDuration >= 100 && newDuration <= 1200)
         {
@@ -2694,13 +3220,13 @@ void processCommand(const char command[])
             sendProtocolLine("Blink-off duration must be 100-1200 milliseconds.");
         }
     }
-    else if (strncmp(command, "PAUSED:", 7) == 0)
+    else if (strncmp(normalized, "PAUSED:", 7) == 0)
     {
-        if (strcmp(command + 7, "1") == 0)
+        if (strcmp(normalized + 7, "1") == 0)
         {
             animationPaused = true;
         }
-        else if (strcmp(command + 7, "0") == 0)
+        else if (strcmp(normalized + 7, "0") == 0)
         {
             animationPaused = false;
             resetAnimation();
@@ -2710,13 +3236,13 @@ void processCommand(const char command[])
             sendProtocolLine("Use PAUSED:0 or PAUSED:1");
         }
     }
-    else if (strncmp(command, "COLOR:", 6) == 0)
+    else if (strncmp(normalized, "COLOR:", 6) == 0)
     {
         int red;
         int green;
         int blue;
 
-        if (sscanf(command + 6, "%d,%d,%d", &red, &green, &blue) == 3)
+        if (sscanf(normalized + 6, "%d,%d,%d", &red, &green, &blue) == 3)
         {
             if (red >= 0 && red <= 255 &&
                 green >= 0 && green <= 255 &&
@@ -2745,9 +3271,9 @@ void processCommand(const char command[])
             sendProtocolLine("Use COLOR:red,green,blue");
         }
     }
-    else if (strncmp(command, "BRIGHTNESS:", 11) == 0)
+    else if (strncmp(normalized, "BRIGHTNESS:", 11) == 0)
     {
-        int newBrightness = atoi(command + 11);
+        int newBrightness = atoi(normalized + 11);
 
         if (newBrightness >= 0 && newBrightness <= 255)
         {
@@ -2762,16 +3288,16 @@ void processCommand(const char command[])
             sendProtocolLine("Brightness must be 0-255.");
         }
     }
-    else if (strcmp(command, "STATUS") == 0)
+    else if (strcmp(normalized, "STATUS") == 0)
     {
         printStatus();
     }
-    else if (strcmp(command, "RESET") == 0)
+    else if (strcmp(normalized, "RESET") == 0)
     {
         resetAnimation();
         sendProtocolLine("Animation reset.");
     }
-    else if (strcmp(command, "HELP") == 0)
+    else if (strcmp(normalized, "HELP") == 0)
     {
         printHelp();
     }
@@ -2786,11 +3312,6 @@ void checkSerialInput()
     while (Serial.available() > 0)
     {
         char incomingCharacter = Serial.read();
-
-        if (incomingCharacter >= 'a' && incomingCharacter <= 'z')
-        {
-            incomingCharacter = incomingCharacter - 'a' + 'A';
-        }
 
         if (incomingCharacter == '\r')
         {
@@ -2940,6 +3461,8 @@ void loop()
 {
     httpServer.handleClient();
     webSocket.loop();
+    updateNetworkScan();
+    updateStationConnection();
     checkSerialInput();
     updateAnimation();
 }

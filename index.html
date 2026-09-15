@@ -625,6 +625,57 @@
               </div>
             </div>
 
+            <details class="control-section" id="networkSettings">
+              <summary>Network Settings</summary>
+              <div class="advanced-content">
+                <div class="status" id="networkStatus"></div>
+                <div class="help" id="networkHttpsHint" hidden></div>
+                <div class="two">
+                  <div>
+                    <label>Direct network</label>
+                    <div class="mini" id="apNetworkLabel">PixelBoard-XXXX · 192.168.4.1</div>
+                  </div>
+                  <div>
+                    <label>Normal Wi-Fi</label>
+                    <div class="mini" id="stationNetworkLabel">Not configured</div>
+                  </div>
+                </div>
+                <div class="two">
+                  <div>
+                    <label>Hostname</label>
+                    <div class="mini" id="hostnameLabel">pixelboard-xxxx.local</div>
+                  </div>
+                  <div>
+                    <label>Signal</label>
+                    <div class="mini" id="stationSignalLabel">—</div>
+                  </div>
+                </div>
+                <div class="btnrow">
+                  <button id="scanNetworksBtn" type="button">Scan networks</button>
+                  <button id="forgetNetworkBtn" type="button">Forget Network</button>
+                </div>
+                <div class="field">
+                  <label for="networkSelect">Available networks</label>
+                  <select id="networkSelect">
+                    <option value="">Scan to select a network</option>
+                  </select>
+                </div>
+                <div class="two">
+                  <div>
+                    <label for="manualSsid">Manual SSID</label>
+                    <input id="manualSsid" type="text" autocomplete="off" />
+                  </div>
+                  <div>
+                    <label for="wifiPassword">Password</label>
+                    <input id="wifiPassword" type="password" autocomplete="new-password" />
+                  </div>
+                </div>
+                <div class="btnrow">
+                  <button id="connectSaveNetworkBtn" type="button">Connect and Save</button>
+                </div>
+              </div>
+            </details>
+
             <div class="control-section">
               <div class="section-title">Content</div>
               <div class="two">
@@ -1691,6 +1742,18 @@ function updateContentAccent(hex) {
       connectWifiBtn: document.getElementById("connectWifiBtn"),
       disconnectBtn: document.getElementById("disconnectBtn"),
       getStatusBtn: document.getElementById("getStatusBtn"),
+      networkStatus: document.getElementById("networkStatus"),
+      networkHttpsHint: document.getElementById("networkHttpsHint"),
+      apNetworkLabel: document.getElementById("apNetworkLabel"),
+      stationNetworkLabel: document.getElementById("stationNetworkLabel"),
+      hostnameLabel: document.getElementById("hostnameLabel"),
+      stationSignalLabel: document.getElementById("stationSignalLabel"),
+      scanNetworksBtn: document.getElementById("scanNetworksBtn"),
+      forgetNetworkBtn: document.getElementById("forgetNetworkBtn"),
+      networkSelect: document.getElementById("networkSelect"),
+      manualSsid: document.getElementById("manualSsid"),
+      wifiPassword: document.getElementById("wifiPassword"),
+      connectSaveNetworkBtn: document.getElementById("connectSaveNetworkBtn"),
       resolutionLabel: document.getElementById("resolutionLabel"),
       pointerLabel: document.getElementById("pointerLabel"),
       playPause: document.getElementById("playPause"),
@@ -1848,6 +1911,18 @@ function updateContentAccent(hex) {
       rain: false,
       fire: false
     };
+    let networkInfo = {
+      apSsid: "PixelBoard-XXXX",
+      apIp: "192.168.4.1",
+      staConfigured: false,
+      staStatus: "UNKNOWN",
+      staSsid: "",
+      staIp: "",
+      staRssi: "",
+      hostname: "pixelboard-xxxx.local",
+      scanStatus: "Idle",
+      networks: []
+    };
 
     function isPixelBoardConnected() {
       return Boolean(activeTransport?.isConnected());
@@ -1868,6 +1943,35 @@ function updateContentAccent(hex) {
       new Promise(resolve => {
         window.setTimeout(resolve, milliseconds);
       });
+
+    function encodeNetworkValue(value) {
+      return encodeURIComponent(value);
+    }
+
+    function decodeNetworkValue(value) {
+      try {
+        return decodeURIComponent(value || "");
+      } catch {
+        return value || "";
+      }
+    }
+
+    function parseKeyValuePayload(payload) {
+      const values = {};
+
+      payload.split(";").forEach(part => {
+        const separatorIndex = part.indexOf("=");
+
+        if (separatorIndex === -1) {
+          return;
+        }
+
+        values[part.substring(0, separatorIndex)] =
+          part.substring(separatorIndex + 1);
+      });
+
+      return values;
+    }
 
     function hardwareBrightnessToUi(hardwareBrightness) {
       return clamp(Number(hardwareBrightness) / 255, 0, 1);
@@ -2302,6 +2406,58 @@ function updateContentAccent(hex) {
       }
     }
 
+    function renderNetworkSettings() {
+      elements.apNetworkLabel.textContent =
+        `${networkInfo.apSsid} · ${networkInfo.apIp}`;
+      elements.stationNetworkLabel.textContent =
+        networkInfo.staStatus === "CONNECTED"
+          ? `${networkInfo.staSsid || "Connected"} · ${networkInfo.staIp}`
+          : (
+              networkInfo.staConfigured
+                ? `${networkInfo.staSsid || "Saved network"} · ${networkInfo.staStatus}`
+                : "Not configured"
+            );
+      elements.hostnameLabel.textContent = networkInfo.hostname;
+      elements.stationSignalLabel.textContent =
+        networkInfo.staStatus === "CONNECTED" && networkInfo.staRssi
+          ? `${networkInfo.staRssi} dBm`
+          : "—";
+      elements.networkStatus.textContent =
+        `Normal Wi-Fi: ${networkInfo.staStatus.replaceAll("_", " ")} · Scan: ${networkInfo.scanStatus}`;
+      elements.scanNetworksBtn.disabled =
+        !isPixelBoardConnected() || networkInfo.scanStatus === "Scanning";
+      elements.connectSaveNetworkBtn.disabled = !isPixelBoardConnected();
+      elements.forgetNetworkBtn.disabled =
+        !isPixelBoardConnected() || !networkInfo.staConfigured;
+
+      elements.networkSelect.innerHTML = "";
+
+      if (networkInfo.networks.length === 0) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "Scan to select a network";
+        elements.networkSelect.appendChild(option);
+      } else {
+        networkInfo.networks.forEach(network => {
+          const option = document.createElement("option");
+          option.value = network.ssid;
+          option.textContent =
+            `${network.ssid} · ${network.rssi} dBm${network.secured ? " · secured" : " · open"}`;
+          elements.networkSelect.appendChild(option);
+        });
+      }
+
+      const publicHttps =
+        location.protocol === "https:" &&
+        location.hostname !== "localhost" &&
+        location.hostname !== "127.0.0.1";
+
+      elements.networkHttpsHint.hidden = !publicHttps;
+      elements.networkHttpsHint.textContent = publicHttps
+        ? "For Wi-Fi control, open the app hosted by the Pixel Board using its hostname or IP address."
+        : "";
+    }
+
     function renderPresetSelection() {
       elements.presetGrid.innerHTML = "";
 
@@ -2528,6 +2684,7 @@ function updateContentAccent(hex) {
       elements.status.textContent = getWorkflowStatus();
 
       updateBezel();
+      renderNetworkSettings();
     }
 
     /* =========================================================
@@ -3231,6 +3388,14 @@ function updateContentAccent(hex) {
         return DEFAULT_PIXEL_BOARD_WS_URL;
       }
 
+      if (
+        location.protocol === "https:" &&
+        location.hostname !== "localhost" &&
+        location.hostname !== "127.0.0.1"
+      ) {
+        return DEFAULT_PIXEL_BOARD_WS_URL;
+      }
+
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const hostname = location.hostname || "192.168.4.1";
 
@@ -3309,6 +3474,17 @@ function updateContentAccent(hex) {
     }
 
     async function connectToPixelBoard(type = "usb", options = {}) {
+      if (
+        type === "wifi" &&
+        location.protocol === "https:" &&
+        location.hostname !== "localhost" &&
+        location.hostname !== "127.0.0.1"
+      ) {
+        setStatus("Open the Pixel Board-hosted app for Wi-Fi control.");
+        renderNetworkSettings();
+        return;
+      }
+
       if (isPixelBoardConnected()) {
         await disconnectFromPixelBoard({ quiet: true });
       }
@@ -3643,6 +3819,99 @@ async function publishPresetToBoard() {
   setStatus(`${preset.name} sent to Pixel Board.`);
 }
 
+function applyNetworkStatus(values) {
+  if (values.AP_SSID !== undefined) {
+    networkInfo.apSsid = decodeNetworkValue(values.AP_SSID);
+  }
+
+  if (values.AP_IP !== undefined) {
+    networkInfo.apIp = values.AP_IP || "192.168.4.1";
+  }
+
+  if (values.STA_CONFIGURED !== undefined) {
+    networkInfo.staConfigured = values.STA_CONFIGURED === "1";
+  }
+
+  if (values.STA_STATUS !== undefined) {
+    networkInfo.staStatus = values.STA_STATUS || "UNKNOWN";
+  }
+
+  if (values.STA_SSID !== undefined) {
+    networkInfo.staSsid = decodeNetworkValue(values.STA_SSID);
+  }
+
+  if (values.STA_IP !== undefined) {
+    networkInfo.staIp = values.STA_IP;
+  }
+
+  if (values.STA_RSSI !== undefined) {
+    networkInfo.staRssi = values.STA_RSSI;
+  }
+
+  if (values.HOSTNAME !== undefined) {
+    networkInfo.hostname = values.HOSTNAME;
+  }
+
+  renderNetworkSettings();
+}
+
+function processNetworkScanLine(line) {
+  if (line === "NET_SCAN:STARTED") {
+    networkInfo.scanStatus = "Scanning";
+    networkInfo.networks = [];
+    syncUI();
+    return true;
+  }
+
+  if (line === "NET_SCAN:BUSY") {
+    networkInfo.scanStatus = "Scanning";
+    syncUI();
+    return true;
+  }
+
+  if (line === "NET_SCAN:BEGIN") {
+    networkInfo.scanStatus = "Scanning";
+    networkInfo.networks = [];
+    syncUI();
+    return true;
+  }
+
+  if (line.startsWith("NET_SCAN:ITEM:")) {
+    const payload = line.substring(14);
+    const parts = payload.split(":");
+
+    if (parts.length >= 3) {
+      const ssid = decodeNetworkValue(parts[0]);
+
+      if (!networkInfo.networks.some(network => network.ssid === ssid)) {
+        networkInfo.networks.push({
+          ssid,
+          rssi: Number(parts[1]),
+          secured: parts[2] === "1"
+        });
+      }
+    }
+
+    syncUI();
+    return true;
+  }
+
+  if (line === "NET_SCAN:END") {
+    networkInfo.scanStatus =
+      networkInfo.networks.length > 0 ? "Complete" : "No networks found";
+    syncUI();
+    return true;
+  }
+
+  if (line === "NET_SCAN:ERROR") {
+    networkInfo.scanStatus = "Scan failed";
+    syncUI();
+    return true;
+  }
+
+  return false;
+}
+
 function processSerialLine(line) {
   line = line.trim();
 
@@ -3652,30 +3921,49 @@ function processSerialLine(line) {
 
   console.log("ESP32:", line);
 
+  if (line.startsWith("NET_STATUS:")) {
+    applyNetworkStatus(parseKeyValuePayload(line.substring(11)));
+    return;
+  }
+
+  if (line.startsWith("NET_CONNECT:")) {
+    if (line === "NET_CONNECT:CONNECTING") {
+      networkInfo.staStatus = "CONNECTING";
+    } else if (line === "NET_CONNECT:CONNECTED") {
+      networkInfo.staStatus = "CONNECTED";
+    } else if (line.includes("ERROR")) {
+      networkInfo.staStatus = "FAILED";
+    } else if (line === "NET_CONNECT:UNAVAILABLE") {
+      networkInfo.staStatus = "UNAVAILABLE";
+    }
+
+    syncUI();
+    return;
+  }
+
+  if (line === "NET_FORGET:OK") {
+    networkInfo.staConfigured = false;
+    networkInfo.staStatus = "NOT_CONFIGURED";
+    networkInfo.staSsid = "";
+    networkInfo.staIp = "";
+    networkInfo.staRssi = "";
+    syncUI();
+    return;
+  }
+
+  if (processNetworkScanLine(line)) {
+    return;
+  }
+
   if (!line.startsWith("STATUS:")) {
     return;
   }
 
   hasReceivedStatus = true;
 
-  const statusText = line.substring(7);
+  const values = parseKeyValuePayload(line.substring(7));
 
-  const parts = statusText.split(";");
-
-  const values = {};
-
-  for (const part of parts) {
-    const separatorIndex = part.indexOf("=");
-
-    if (separatorIndex === -1) {
-      continue;
-    }
-
-    const key = part.substring(0, separatorIndex);
-    const value = part.substring(separatorIndex + 1);
-
-    values[key] = value;
-  }
+  applyNetworkStatus(values);
 
   const rawMode = values.MODE?.toLowerCase();
   const statusMode =
@@ -3935,6 +4223,52 @@ function processSerialLine(line) {
 
     elements.getStatusBtn.addEventListener("click", () => {
       syncStatusFromBoard();
+      sendCommand("NET_STATUS");
+    });
+
+    elements.scanNetworksBtn.addEventListener("click", () => {
+      networkInfo.scanStatus = "Scanning";
+      networkInfo.networks = [];
+      syncUI();
+      sendCommand("NET_SCAN");
+    });
+
+    elements.networkSelect.addEventListener("change", (event) => {
+      if (event.target.value) {
+        elements.manualSsid.value = event.target.value;
+      }
+    });
+
+    elements.connectSaveNetworkBtn.addEventListener("click", async () => {
+      const ssid =
+        elements.manualSsid.value.trim() ||
+        elements.networkSelect.value.trim();
+      const password = elements.wifiPassword.value;
+
+      if (!ssid || ssid.length > 32 || password.length > 63) {
+        setStatus("Check the Wi-Fi network name and password length.");
+        return;
+      }
+
+      networkInfo.staStatus = "CONNECTING";
+      syncUI();
+
+      const sent = await sendCommand(
+        `NET_CONNECT:${encodeNetworkValue(ssid)}:${encodeNetworkValue(password)}`
+      );
+
+      if (sent) {
+        elements.wifiPassword.value = "";
+        setStatus("Wi-Fi connection started.");
+      }
+    });
+
+    elements.forgetNetworkBtn.addEventListener("click", () => {
+      if (!window.confirm("Forget the saved normal Wi-Fi network?")) {
+        return;
+      }
+
+      sendCommand("NET_FORGET");
     });
 
     async function toggleFullscreen() {
