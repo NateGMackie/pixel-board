@@ -1,11 +1,18 @@
 #include <Arduino.h>
 #include <esp_system.h>
 #include <FastLED.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <WiFi.h>
+
+#include "generated_web_app.h"
 
 void showDisplay();
 void printStatus();
 void resetAnimation();
 void renderAnimationFrame();
+void processCommand(const char command[]);
+void sendProtocolLine(const String &line);
 
 // -------------------------
 // Display Configuration
@@ -17,7 +24,11 @@ const int LED_COUNT = DISPLAY_WIDTH * DISPLAY_HEIGHT;
 
 #define DATA_PIN 17
 
+const char PIXEL_BOARD_AP_PASSWORD[] = "PixelBoard123";
+
 CRGB physicalLeds[LED_COUNT];
+WebServer httpServer(80);
+WebSocketsServer webSocket(81);
 
 // -------------------------
 // Color
@@ -949,6 +960,114 @@ Color stagingDrawingFrame[LED_COUNT];
 bool stagingRowsReceived[DISPLAY_HEIGHT];
 bool receivingFrame = false;
 
+void sendProtocolLine(const String &line)
+{
+    Serial.println(line);
+    String payload = line;
+    webSocket.broadcastTXT(payload);
+}
+
+void sendProtocolLine(const char line[])
+{
+    sendProtocolLine(String(line));
+}
+
+String getAccessPointSsid()
+{
+    uint64_t mac = ESP.getEfuseMac();
+    char suffix[5];
+
+    snprintf(suffix, sizeof(suffix), "%04X", (uint16_t)(mac & 0xFFFF));
+
+    return String("PixelBoard-") + suffix;
+}
+
+void handleWebAppRequest()
+{
+    httpServer.sendHeader("Content-Encoding", "gzip");
+    httpServer.sendHeader("Cache-Control", "no-cache");
+    httpServer.send_P(
+        200,
+        "text/html",
+        (const char *)WEB_APP_GZ,
+        WEB_APP_GZ_LEN
+    );
+}
+
+void handleNotFound()
+{
+    httpServer.send(404, "text/plain", "Not found");
+}
+
+void handleWebSocketEvent(
+    uint8_t clientNumber,
+    WStype_t type,
+    uint8_t *payload,
+    size_t length)
+{
+    if (type == WStype_CONNECTED)
+    {
+        webSocket.sendTXT(clientNumber, "PIXEL_BOARD:CONNECTED");
+        printStatus();
+        return;
+    }
+
+    if (type == WStype_TEXT)
+    {
+        if (length == 0 || length >= COMMAND_BUFFER_SIZE)
+        {
+            webSocket.sendTXT(clientNumber, "ERROR:COMMAND_TOO_LONG");
+            return;
+        }
+
+        char command[COMMAND_BUFFER_SIZE];
+
+        memcpy(command, payload, length);
+        command[length] = '\0';
+
+        for (size_t i = 0; command[i] != '\0'; i++)
+        {
+            if (command[i] >= 'a' && command[i] <= 'z')
+            {
+                command[i] = command[i] - 'a' + 'A';
+            }
+        }
+
+        processCommand(command);
+        return;
+    }
+
+    if (type == WStype_BIN)
+    {
+        webSocket.sendTXT(clientNumber, "ERROR:BINARY_UNSUPPORTED");
+    }
+}
+
+void startWirelessServices()
+{
+    String ssid = getAccessPointSsid();
+
+    WiFi.mode(WIFI_AP);
+    bool apStarted = WiFi.softAP(ssid.c_str(), PIXEL_BOARD_AP_PASSWORD);
+
+    Serial.print("Pixel Board AP SSID: ");
+    Serial.println(ssid);
+    Serial.print("Pixel Board AP IP: ");
+    Serial.println(WiFi.softAPIP());
+    Serial.println("Pixel Board URL: http://192.168.4.1/");
+    Serial.print("Pixel Board AP started: ");
+    Serial.println(apStarted ? "yes" : "no");
+
+    httpServer.on("/", HTTP_GET, handleWebAppRequest);
+    httpServer.onNotFound(handleNotFound);
+    httpServer.begin();
+    Serial.println("HTTP server started: yes");
+
+    webSocket.begin();
+    webSocket.onEvent(handleWebSocketEvent);
+    Serial.println("WebSocket server started: yes");
+}
+
 const char *getEffectName()
 {
     switch (animationEffect)
@@ -1480,7 +1599,7 @@ bool setActivePreset(const char value[])
     if (strcmp(value, "SOLID") == 0)
     {
         activePreset = PRESET_SOLID;
-        Serial.println("PRESET:SOLID");
+        sendProtocolLine("PRESET:SOLID");
 
         if (contentMode == MODE_PRESET)
         {
@@ -1494,7 +1613,7 @@ bool setActivePreset(const char value[])
     {
         activePreset = PRESET_CLOCK;
         lastRenderedClockMinute = -2;
-        Serial.println("PRESET:CLOCK");
+        sendProtocolLine("PRESET:CLOCK");
 
         if (contentMode == MODE_PRESET)
         {
@@ -1509,7 +1628,7 @@ bool setActivePreset(const char value[])
         activePreset = PRESET_RAIN;
         initializeRainPreset();
         lastAutonomousTime = millis();
-        Serial.println("PRESET:RAIN");
+        sendProtocolLine("PRESET:RAIN");
 
         if (contentMode == MODE_PRESET)
         {
@@ -1524,7 +1643,7 @@ bool setActivePreset(const char value[])
         activePreset = PRESET_FIRE;
         initializeFirePreset();
         lastAutonomousTime = millis();
-        Serial.println("PRESET:FIRE");
+        sendProtocolLine("PRESET:FIRE");
 
         if (contentMode == MODE_PRESET)
         {
@@ -1587,12 +1706,12 @@ bool setPresetParameter(const char command[])
 
         if (!parseRgbParameter(command + 6, &color))
         {
-            Serial.println("PRESET_PARAM:ERROR:COLOR");
+            sendProtocolLine("PRESET_PARAM:ERROR:COLOR");
             return true;
         }
 
         solidPresetColor = color;
-        Serial.println("PRESET_PARAM:COLOR:OK");
+        sendProtocolLine("PRESET_PARAM:COLOR:OK");
 
         if (contentMode == MODE_PRESET && activePreset == PRESET_SOLID)
         {
@@ -1608,12 +1727,12 @@ bool setPresetParameter(const char command[])
 
         if (!parseRgbParameter(command + 12, &color))
         {
-            Serial.println("PRESET_PARAM:ERROR:CLOCK_COLOR");
+            sendProtocolLine("PRESET_PARAM:ERROR:CLOCK_COLOR");
             return true;
         }
 
         clockPresetColor = color;
-        Serial.println("PRESET_PARAM:CLOCK_COLOR:OK");
+        sendProtocolLine("PRESET_PARAM:CLOCK_COLOR:OK");
 
         if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
         {
@@ -1635,12 +1754,12 @@ bool setPresetParameter(const char command[])
         }
         else
         {
-            Serial.println("PRESET_PARAM:ERROR:CLOCK_FORMAT");
+            sendProtocolLine("PRESET_PARAM:ERROR:CLOCK_FORMAT");
             return true;
         }
 
         lastRenderedClockMinute = -2;
-        Serial.println("PRESET_PARAM:CLOCK_FORMAT:OK");
+        sendProtocolLine("PRESET_PARAM:CLOCK_FORMAT:OK");
 
         if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
         {
@@ -1662,12 +1781,12 @@ bool setPresetParameter(const char command[])
         }
         else
         {
-            Serial.println("PRESET_PARAM:ERROR:CLOCK_LEADING_ZERO");
+            sendProtocolLine("PRESET_PARAM:ERROR:CLOCK_LEADING_ZERO");
             return true;
         }
 
         lastRenderedClockMinute = -2;
-        Serial.println("PRESET_PARAM:CLOCK_LEADING_ZERO:OK");
+        sendProtocolLine("PRESET_PARAM:CLOCK_LEADING_ZERO:OK");
 
         if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
         {
@@ -1683,12 +1802,12 @@ bool setPresetParameter(const char command[])
 
         if (!parseRgbParameter(command + 11, &color))
         {
-            Serial.println("PRESET_PARAM:ERROR:RAIN_COLOR");
+            sendProtocolLine("PRESET_PARAM:ERROR:RAIN_COLOR");
             return true;
         }
 
         rainPresetColor = color;
-        Serial.println("PRESET_PARAM:RAIN_COLOR:OK");
+        sendProtocolLine("PRESET_PARAM:RAIN_COLOR:OK");
 
         if (contentMode == MODE_PRESET && activePreset == PRESET_RAIN)
         {
@@ -1702,12 +1821,12 @@ bool setPresetParameter(const char command[])
     {
         if (!parseIntegerParameter(command + 11, 1, 20, &rainSpeed))
         {
-            Serial.println("PRESET_PARAM:ERROR:RAIN_SPEED");
+            sendProtocolLine("PRESET_PARAM:ERROR:RAIN_SPEED");
             return true;
         }
 
         lastAutonomousTime = millis();
-        Serial.println("PRESET_PARAM:RAIN_SPEED:OK");
+        sendProtocolLine("PRESET_PARAM:RAIN_SPEED:OK");
         return true;
     }
 
@@ -1715,11 +1834,11 @@ bool setPresetParameter(const char command[])
     {
         if (!parseIntegerParameter(command + 13, 1, 100, &rainDensity))
         {
-            Serial.println("PRESET_PARAM:ERROR:RAIN_DENSITY");
+            sendProtocolLine("PRESET_PARAM:ERROR:RAIN_DENSITY");
             return true;
         }
 
-        Serial.println("PRESET_PARAM:RAIN_DENSITY:OK");
+        sendProtocolLine("PRESET_PARAM:RAIN_DENSITY:OK");
         return true;
     }
 
@@ -1727,11 +1846,11 @@ bool setPresetParameter(const char command[])
     {
         if (!parseIntegerParameter(command + 11, 2, 7, &rainTrailLength))
         {
-            Serial.println("PRESET_PARAM:ERROR:RAIN_TRAIL");
+            sendProtocolLine("PRESET_PARAM:ERROR:RAIN_TRAIL");
             return true;
         }
 
-        Serial.println("PRESET_PARAM:RAIN_TRAIL:OK");
+        sendProtocolLine("PRESET_PARAM:RAIN_TRAIL:OK");
 
         if (contentMode == MODE_PRESET && activePreset == PRESET_RAIN)
         {
@@ -1757,11 +1876,11 @@ bool setPresetParameter(const char command[])
         }
         else
         {
-            Serial.println("PRESET_PARAM:ERROR:FIRE_PALETTE");
+            sendProtocolLine("PRESET_PARAM:ERROR:FIRE_PALETTE");
             return true;
         }
 
-        Serial.println("PRESET_PARAM:FIRE_PALETTE:OK");
+        sendProtocolLine("PRESET_PARAM:FIRE_PALETTE:OK");
 
         if (contentMode == MODE_PRESET && activePreset == PRESET_FIRE)
         {
@@ -1775,12 +1894,12 @@ bool setPresetParameter(const char command[])
     {
         if (!parseIntegerParameter(command + 11, 1, 20, &fireSpeed))
         {
-            Serial.println("PRESET_PARAM:ERROR:FIRE_SPEED");
+            sendProtocolLine("PRESET_PARAM:ERROR:FIRE_SPEED");
             return true;
         }
 
         lastAutonomousTime = millis();
-        Serial.println("PRESET_PARAM:FIRE_SPEED:OK");
+        sendProtocolLine("PRESET_PARAM:FIRE_SPEED:OK");
         return true;
     }
 
@@ -1788,11 +1907,11 @@ bool setPresetParameter(const char command[])
     {
         if (!parseIntegerParameter(command + 15, 1, 100, &fireIntensity))
         {
-            Serial.println("PRESET_PARAM:ERROR:FIRE_INTENSITY");
+            sendProtocolLine("PRESET_PARAM:ERROR:FIRE_INTENSITY");
             return true;
         }
 
-        Serial.println("PRESET_PARAM:FIRE_INTENSITY:OK");
+        sendProtocolLine("PRESET_PARAM:FIRE_INTENSITY:OK");
         return true;
     }
 
@@ -1841,7 +1960,7 @@ bool setClockTime(const char command[])
     clockTimeValid = true;
     lastRenderedClockMinute = getCurrentClockMinute();
 
-    Serial.println("CLOCK_TIME:OK");
+    sendProtocolLine("CLOCK_TIME:OK");
 
     if (contentMode == MODE_PRESET && activePreset == PRESET_CLOCK)
     {
@@ -1881,7 +2000,7 @@ void beginFrameTransfer(const char dimensions[])
 {
     if (strcmp(dimensions, "32X8") != 0)
     {
-        Serial.println("FRAME:ERROR:DIMENSIONS");
+        sendProtocolLine("FRAME:ERROR:DIMENSIONS");
         receivingFrame = false;
         return;
     }
@@ -1889,14 +2008,14 @@ void beginFrameTransfer(const char dimensions[])
     clearDrawingFrame(stagingDrawingFrame);
     clearStagingRows();
     receivingFrame = true;
-    Serial.println("FRAME:READY");
+    sendProtocolLine("FRAME:READY");
 }
 
 void storeFrameRow(const char command[])
 {
     if (!receivingFrame)
     {
-        Serial.println("ROW:ERROR:NO_FRAME");
+        sendProtocolLine("ROW:ERROR:NO_FRAME");
         return;
     }
 
@@ -1905,7 +2024,7 @@ void storeFrameRow(const char command[])
 
     if (separator == nullptr || separator == rowText)
     {
-        Serial.println("ROW:ERROR:FORMAT");
+        sendProtocolLine("ROW:ERROR:FORMAT");
         return;
     }
 
@@ -1913,7 +2032,7 @@ void storeFrameRow(const char command[])
     {
         if (*character < '0' || *character > '9')
         {
-            Serial.println("ROW:ERROR:INDEX");
+            sendProtocolLine("ROW:ERROR:INDEX");
             return;
         }
     }
@@ -1922,7 +2041,7 @@ void storeFrameRow(const char command[])
 
     if (row < 0 || row >= DISPLAY_HEIGHT)
     {
-        Serial.println("ROW:ERROR:INDEX");
+        sendProtocolLine("ROW:ERROR:INDEX");
         return;
     }
 
@@ -1930,7 +2049,7 @@ void storeFrameRow(const char command[])
 
     if (strlen(hex) != FRAME_ROW_HEX_LENGTH)
     {
-        Serial.println("ROW:ERROR:LENGTH");
+        sendProtocolLine("ROW:ERROR:LENGTH");
         return;
     }
 
@@ -1938,7 +2057,7 @@ void storeFrameRow(const char command[])
     {
         if (!isHexCharacter(hex[i]))
         {
-            Serial.println("ROW:ERROR:HEX");
+            sendProtocolLine("ROW:ERROR:HEX");
             return;
         }
     }
@@ -1951,16 +2070,14 @@ void storeFrameRow(const char command[])
 
     stagingRowsReceived[row] = true;
 
-    Serial.print("ROW:");
-    Serial.print(row);
-    Serial.println(":OK");
+    sendProtocolLine(String("ROW:") + row + ":OK");
 }
 
 void endFrameTransfer()
 {
     if (!receivingFrame)
     {
-        Serial.println("FRAME:ERROR:NO_FRAME");
+        sendProtocolLine("FRAME:ERROR:NO_FRAME");
         return;
     }
 
@@ -1968,7 +2085,7 @@ void endFrameTransfer()
     {
         if (!stagingRowsReceived[row])
         {
-            Serial.println("FRAME:ERROR:INCOMPLETE");
+            sendProtocolLine("FRAME:ERROR:INCOMPLETE");
             return;
         }
     }
@@ -1979,7 +2096,7 @@ void endFrameTransfer()
     }
 
     receivingFrame = false;
-    Serial.println("FRAME:STORED");
+    sendProtocolLine("FRAME:STORED");
 }
 
 bool setContentMode(const char value[])
@@ -1988,7 +2105,7 @@ bool setContentMode(const char value[])
     {
         contentMode = MODE_TEXT;
         resetAnimation();
-        Serial.println("MODE:TEXT");
+        sendProtocolLine("MODE:TEXT");
         return true;
     }
 
@@ -1996,7 +2113,7 @@ bool setContentMode(const char value[])
     {
         contentMode = MODE_DRAWING;
         resetAnimation();
-        Serial.println("MODE:DRAWING");
+        sendProtocolLine("MODE:DRAWING");
         return true;
     }
 
@@ -2004,7 +2121,7 @@ bool setContentMode(const char value[])
     {
         contentMode = MODE_PRESET;
         resetAnimation();
-        Serial.println("MODE:PRESET");
+        sendProtocolLine("MODE:PRESET");
         return true;
     }
 
@@ -2149,129 +2266,109 @@ void resetAnimation()
 
 void printStatus()
 {
-    Serial.print("STATUS:MATRIX=");
-    Serial.print(DISPLAY_WIDTH);
-    Serial.print("x");
-    Serial.print(DISPLAY_HEIGHT);
+    String status = "STATUS:MATRIX=";
 
-    Serial.print(";MESSAGE=");
-    Serial.print(message);
+    status += DISPLAY_WIDTH;
+    status += "x";
+    status += DISPLAY_HEIGHT;
+    status += ";MESSAGE=";
+    status += message;
+    status += ";EFFECT=";
+    status += getEffectName();
+    status += ";DIRECTION=";
+    status += getDirectionName();
+    status += ";MODE=";
+    status += getContentModeName();
+    status += ";PRESET=";
+    status += getPresetName();
+    status += ";PRESET_COLOR=";
+    status += solidPresetColor.red;
+    status += ",";
+    status += solidPresetColor.green;
+    status += ",";
+    status += solidPresetColor.blue;
+    status += ";CLOCK_COLOR=";
+    status += clockPresetColor.red;
+    status += ",";
+    status += clockPresetColor.green;
+    status += ",";
+    status += clockPresetColor.blue;
+    status += ";CLOCK_FORMAT=";
+    status += (clockUse24Hour ? 24 : 12);
+    status += ";CLOCK_LEADING_ZERO=";
+    status += (clockLeadingZero ? 1 : 0);
+    status += ";CLOCK_VALID=";
+    status += (clockTimeValid ? 1 : 0);
+    status += ";RAIN_COLOR=";
+    status += rainPresetColor.red;
+    status += ",";
+    status += rainPresetColor.green;
+    status += ",";
+    status += rainPresetColor.blue;
+    status += ";RAIN_SPEED=";
+    status += rainSpeed;
+    status += ";RAIN_DENSITY=";
+    status += rainDensity;
+    status += ";RAIN_TRAIL=";
+    status += rainTrailLength;
+    status += ";FIRE_PALETTE=";
+    status += getFirePaletteName();
+    status += ";FIRE_SPEED=";
+    status += fireSpeed;
+    status += ";FIRE_INTENSITY=";
+    status += fireIntensity;
+    status += ";SPEED=";
+    status += animationSpeed;
+    status += ";BLINK_ON=";
+    status += blinkOnMs;
+    status += ";BLINK_OFF=";
+    status += blinkOffMs;
+    status += ";PAUSED=";
+    status += (animationPaused ? 1 : 0);
+    status += ";COLOR=";
+    status += messageColor.red;
+    status += ",";
+    status += messageColor.green;
+    status += ",";
+    status += messageColor.blue;
+    status += ";BRIGHTNESS=";
+    status += brightness;
 
-    Serial.print(";EFFECT=");
-    Serial.print(getEffectName());
-
-    Serial.print(";DIRECTION=");
-    Serial.print(getDirectionName());
-
-    Serial.print(";MODE=");
-    Serial.print(getContentModeName());
-
-    Serial.print(";PRESET=");
-    Serial.print(getPresetName());
-
-    Serial.print(";PRESET_COLOR=");
-    Serial.print(solidPresetColor.red);
-    Serial.print(",");
-    Serial.print(solidPresetColor.green);
-    Serial.print(",");
-    Serial.print(solidPresetColor.blue);
-
-    Serial.print(";CLOCK_COLOR=");
-    Serial.print(clockPresetColor.red);
-    Serial.print(",");
-    Serial.print(clockPresetColor.green);
-    Serial.print(",");
-    Serial.print(clockPresetColor.blue);
-
-    Serial.print(";CLOCK_FORMAT=");
-    Serial.print(clockUse24Hour ? 24 : 12);
-
-    Serial.print(";CLOCK_LEADING_ZERO=");
-    Serial.print(clockLeadingZero ? 1 : 0);
-
-    Serial.print(";CLOCK_VALID=");
-    Serial.print(clockTimeValid ? 1 : 0);
-
-    Serial.print(";RAIN_COLOR=");
-    Serial.print(rainPresetColor.red);
-    Serial.print(",");
-    Serial.print(rainPresetColor.green);
-    Serial.print(",");
-    Serial.print(rainPresetColor.blue);
-
-    Serial.print(";RAIN_SPEED=");
-    Serial.print(rainSpeed);
-
-    Serial.print(";RAIN_DENSITY=");
-    Serial.print(rainDensity);
-
-    Serial.print(";RAIN_TRAIL=");
-    Serial.print(rainTrailLength);
-
-    Serial.print(";FIRE_PALETTE=");
-    Serial.print(getFirePaletteName());
-
-    Serial.print(";FIRE_SPEED=");
-    Serial.print(fireSpeed);
-
-    Serial.print(";FIRE_INTENSITY=");
-    Serial.print(fireIntensity);
-
-    Serial.print(";SPEED=");
-    Serial.print(animationSpeed);
-
-    Serial.print(";BLINK_ON=");
-    Serial.print(blinkOnMs);
-
-    Serial.print(";BLINK_OFF=");
-    Serial.print(blinkOffMs);
-
-    Serial.print(";PAUSED=");
-    Serial.print(animationPaused ? 1 : 0);
-
-    Serial.print(";COLOR=");
-    Serial.print(messageColor.red);
-    Serial.print(",");
-    Serial.print(messageColor.green);
-    Serial.print(",");
-    Serial.print(messageColor.blue);
-
-    Serial.print(";BRIGHTNESS=");
-    Serial.println(brightness);
+    sendProtocolLine(status);
 }
 
 void printHelp()
 {
-    Serial.println("Available commands:");
-    Serial.println("MESSAGE:<text>");
-    Serial.println("MODE:TEXT|DRAWING|PRESET");
-    Serial.println("PRESET:SOLID|CLOCK|RAIN|FIRE");
-    Serial.println("PRESET_PARAM:COLOR:<red>,<green>,<blue>");
-    Serial.println("PRESET_PARAM:CLOCK_COLOR:<red>,<green>,<blue>");
-    Serial.println("PRESET_PARAM:CLOCK_FORMAT:12|24");
-    Serial.println("PRESET_PARAM:CLOCK_LEADING_ZERO:0|1");
-    Serial.println("PRESET_PARAM:RAIN_COLOR:<red>,<green>,<blue>");
-    Serial.println("PRESET_PARAM:RAIN_SPEED:<1-20>");
-    Serial.println("PRESET_PARAM:RAIN_DENSITY:<1-100>");
-    Serial.println("PRESET_PARAM:RAIN_TRAIL:<2-7>");
-    Serial.println("PRESET_PARAM:FIRE_PALETTE:CLASSIC|BLUE|PURPLE");
-    Serial.println("PRESET_PARAM:FIRE_SPEED:<1-20>");
-    Serial.println("PRESET_PARAM:FIRE_INTENSITY:<1-100>");
-    Serial.println("CLOCK_TIME:<unix seconds>:<offset minutes east of UTC>");
-    Serial.println("EFFECT:STILL|SCROLL|WIPE|BLINK");
-    Serial.println("DIRECTION:LEFT|RIGHT|UP|DOWN");
-    Serial.println("SPEED:<pixels per second, 1-30>");
-    Serial.println("BLINK_ON:<milliseconds>");
-    Serial.println("BLINK_OFF:<milliseconds>");
-    Serial.println("PAUSED:0|1");
-    Serial.println("COLOR:<red>,<green>,<blue>");
-    Serial.println("BRIGHTNESS:<0-255>");
-    Serial.println("FRAME_BEGIN:32x8");
-    Serial.println("ROW:<0-7>:<192 hex characters>");
-    Serial.println("FRAME_END");
-    Serial.println("RESET");
-    Serial.println("STATUS");
-    Serial.println("HELP");
+    sendProtocolLine("Available commands:");
+    sendProtocolLine("MESSAGE:<text>");
+    sendProtocolLine("MODE:TEXT|DRAWING|PRESET");
+    sendProtocolLine("PRESET:SOLID|CLOCK|RAIN|FIRE");
+    sendProtocolLine("PRESET_PARAM:COLOR:<red>,<green>,<blue>");
+    sendProtocolLine("PRESET_PARAM:CLOCK_COLOR:<red>,<green>,<blue>");
+    sendProtocolLine("PRESET_PARAM:CLOCK_FORMAT:12|24");
+    sendProtocolLine("PRESET_PARAM:CLOCK_LEADING_ZERO:0|1");
+    sendProtocolLine("PRESET_PARAM:RAIN_COLOR:<red>,<green>,<blue>");
+    sendProtocolLine("PRESET_PARAM:RAIN_SPEED:<1-20>");
+    sendProtocolLine("PRESET_PARAM:RAIN_DENSITY:<1-100>");
+    sendProtocolLine("PRESET_PARAM:RAIN_TRAIL:<2-7>");
+    sendProtocolLine("PRESET_PARAM:FIRE_PALETTE:CLASSIC|BLUE|PURPLE");
+    sendProtocolLine("PRESET_PARAM:FIRE_SPEED:<1-20>");
+    sendProtocolLine("PRESET_PARAM:FIRE_INTENSITY:<1-100>");
+    sendProtocolLine("CLOCK_TIME:<unix seconds>:<offset minutes east of UTC>");
+    sendProtocolLine("EFFECT:STILL|SCROLL|WIPE|BLINK");
+    sendProtocolLine("DIRECTION:LEFT|RIGHT|UP|DOWN");
+    sendProtocolLine("SPEED:<pixels per second, 1-30>");
+    sendProtocolLine("BLINK_ON:<milliseconds>");
+    sendProtocolLine("BLINK_OFF:<milliseconds>");
+    sendProtocolLine("PAUSED:0|1");
+    sendProtocolLine("COLOR:<red>,<green>,<blue>");
+    sendProtocolLine("BRIGHTNESS:<0-255>");
+    sendProtocolLine("FRAME_BEGIN:32x8");
+    sendProtocolLine("ROW:<0-7>:<192 hex characters>");
+    sendProtocolLine("FRAME_END");
+    sendProtocolLine("RESET");
+    sendProtocolLine("STATUS");
+    sendProtocolLine("HELP");
 }
 
 void advanceScroll()
@@ -2436,8 +2533,7 @@ void setMarqueeMessage(const char newMessage[])
     contentMode = MODE_TEXT;
     resetAnimation();
 
-    Serial.print("New message: ");
-    Serial.println(message);
+    sendProtocolLine(String("New message: ") + message);
 }
 
 bool setAnimationEffect(const char value[])
@@ -2504,42 +2600,42 @@ void processCommand(const char command[])
     {
         if (!setAnimationEffect(command + 7))
         {
-            Serial.println("Use EFFECT:STILL|SCROLL|WIPE|BLINK");
+            sendProtocolLine("Use EFFECT:STILL|SCROLL|WIPE|BLINK");
         }
     }
     else if (strncmp(command, "DIRECTION:", 10) == 0)
     {
         if (!setAnimationDirection(command + 10))
         {
-            Serial.println("Use DIRECTION:LEFT|RIGHT|UP|DOWN");
+            sendProtocolLine("Use DIRECTION:LEFT|RIGHT|UP|DOWN");
         }
     }
     else if (strncmp(command, "MODE:", 5) == 0)
     {
         if (!setContentMode(command + 5))
         {
-            Serial.println("Use MODE:TEXT|DRAWING|PRESET");
+            sendProtocolLine("Use MODE:TEXT|DRAWING|PRESET");
         }
     }
     else if (strncmp(command, "PRESET_PARAM:", 13) == 0)
     {
         if (!setPresetParameter(command + 13))
         {
-            Serial.println("Use PRESET_PARAM:COLOR|CLOCK|RAIN|FIRE setting");
+            sendProtocolLine("Use PRESET_PARAM:COLOR|CLOCK|RAIN|FIRE setting");
         }
     }
     else if (strncmp(command, "PRESET:", 7) == 0)
     {
         if (!setActivePreset(command + 7))
         {
-            Serial.println("Use PRESET:SOLID|CLOCK|RAIN|FIRE");
+            sendProtocolLine("Use PRESET:SOLID|CLOCK|RAIN|FIRE");
         }
     }
     else if (strncmp(command, "CLOCK_TIME:", 11) == 0)
     {
         if (!setClockTime(command + 11))
         {
-            Serial.println("Use CLOCK_TIME:unixSeconds:offsetMinutesEastOfUtc");
+            sendProtocolLine("Use CLOCK_TIME:unixSeconds:offsetMinutesEastOfUtc");
         }
     }
     else if (strncmp(command, "FRAME_BEGIN:", 12) == 0)
@@ -2563,13 +2659,11 @@ void processCommand(const char command[])
             animationSpeed = newSpeed;
             resetAnimation();
 
-            Serial.print("New speed: ");
-            Serial.print(animationSpeed);
-            Serial.println(" pixels per second");
+            sendProtocolLine(String("New speed: ") + animationSpeed + " pixels per second");
         }
         else
         {
-            Serial.println("Speed must be 1-30 pixels per second.");
+            sendProtocolLine("Speed must be 1-30 pixels per second.");
         }
     }
     else if (strncmp(command, "BLINK_ON:", 9) == 0)
@@ -2583,7 +2677,7 @@ void processCommand(const char command[])
         }
         else
         {
-            Serial.println("Blink-on duration must be 100-1200 milliseconds.");
+            sendProtocolLine("Blink-on duration must be 100-1200 milliseconds.");
         }
     }
     else if (strncmp(command, "BLINK_OFF:", 10) == 0)
@@ -2597,7 +2691,7 @@ void processCommand(const char command[])
         }
         else
         {
-            Serial.println("Blink-off duration must be 100-1200 milliseconds.");
+            sendProtocolLine("Blink-off duration must be 100-1200 milliseconds.");
         }
     }
     else if (strncmp(command, "PAUSED:", 7) == 0)
@@ -2613,7 +2707,7 @@ void processCommand(const char command[])
         }
         else
         {
-            Serial.println("Use PAUSED:0 or PAUSED:1");
+            sendProtocolLine("Use PAUSED:0 or PAUSED:1");
         }
     }
     else if (strncmp(command, "COLOR:", 6) == 0)
@@ -2630,23 +2724,25 @@ void processCommand(const char command[])
             {
                 messageColor = {red, green, blue};
 
-                Serial.print("New color: ");
-                Serial.print(red);
-                Serial.print(", ");
-                Serial.print(green);
-                Serial.print(", ");
-                Serial.println(blue);
+                sendProtocolLine(
+                    String("New color: ") +
+                    red +
+                    ", " +
+                    green +
+                    ", " +
+                    blue
+                );
 
                 renderAnimationFrame();
             }
             else
             {
-                Serial.println("Color values must be 0-255.");
+                sendProtocolLine("Color values must be 0-255.");
             }
         }
         else
         {
-            Serial.println("Use COLOR:red,green,blue");
+            sendProtocolLine("Use COLOR:red,green,blue");
         }
     }
     else if (strncmp(command, "BRIGHTNESS:", 11) == 0)
@@ -2659,12 +2755,11 @@ void processCommand(const char command[])
             FastLED.setBrightness(brightness);
             showDisplay();
 
-            Serial.print("New brightness: ");
-            Serial.println(brightness);
+            sendProtocolLine(String("New brightness: ") + brightness);
         }
         else
         {
-            Serial.println("Brightness must be 0-255.");
+            sendProtocolLine("Brightness must be 0-255.");
         }
     }
     else if (strcmp(command, "STATUS") == 0)
@@ -2674,7 +2769,7 @@ void processCommand(const char command[])
     else if (strcmp(command, "RESET") == 0)
     {
         resetAnimation();
-        Serial.println("Animation reset.");
+        sendProtocolLine("Animation reset.");
     }
     else if (strcmp(command, "HELP") == 0)
     {
@@ -2682,7 +2777,7 @@ void processCommand(const char command[])
     }
     else
     {
-        Serial.println("Unknown command.");
+        sendProtocolLine("Unknown command.");
     }
 }
 
@@ -2836,12 +2931,15 @@ void setup()
     showDisplay();
 
     resetAnimation();
+    startWirelessServices();
 
     Serial.println("PIXEL BOARD FIRMWARE V2");
 }
 
 void loop()
 {
+    httpServer.handleClient();
+    webSocket.loop();
     checkSerialInput();
     updateAnimation();
 }

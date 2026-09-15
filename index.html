@@ -617,7 +617,9 @@
             <div class="control-section">
               <div class="section-title">Board</div>
               <div class="btnrow">
-                <button class="primary" id="connectBtn" type="button">Connect Pixel Board</button>
+                <button class="primary" id="connectUsbBtn" type="button">Connect via USB</button>
+                <button id="connectWifiBtn" type="button">Connect via Wi-Fi</button>
+                <button id="disconnectBtn" type="button" disabled>Disconnect</button>
                 <button id="getStatusBtn" type="button" disabled>Get status</button>
                 <button id="fullscreenBtn" type="button">Full screen</button>
               </div>
@@ -848,6 +850,7 @@
     const LEGACY_FRAME_FORMAT_VERSION = 1;
     const PIXEL_OFF = false;
     const PIXEL_ON = true;
+    const DEFAULT_PIXEL_BOARD_WS_URL = "ws://192.168.4.1:81/ws";
 
     const FONT_5X7 = {
       " ": [0,0,0,0,0,0,0],
@@ -1684,7 +1687,9 @@ function updateContentAccent(hex) {
       canvas: document.getElementById("canvas"),
       connectionDot: document.getElementById("connectionDot"),
       bezelLabel: document.getElementById("bezelLabel"),
-      connectBtn: document.getElementById("connectBtn"),
+      connectUsbBtn: document.getElementById("connectUsbBtn"),
+      connectWifiBtn: document.getElementById("connectWifiBtn"),
+      disconnectBtn: document.getElementById("disconnectBtn"),
       getStatusBtn: document.getElementById("getStatusBtn"),
       resolutionLabel: document.getElementById("resolutionLabel"),
       pointerLabel: document.getElementById("pointerLabel"),
@@ -1823,6 +1828,9 @@ function updateContentAccent(hex) {
     let statusSyncRequestId = 0;
     let clockSyncTimerId = null;
     let lastClockPreviewMinute = "";
+    let activeTransportName = "";
+    let allowWifiReconnect = false;
+    let wifiReconnectTimerId = null;
     let drawingDirty = false;
     let drawingDisplayDirty = false;
     let displayedContentType = null;
@@ -3088,10 +3096,175 @@ function updateContentAccent(hex) {
       }
     }
 
+    class WebSocketTransport {
+      constructor({ url, onLine, onConnectionChange, onDisconnect, onError }) {
+        this.url = url;
+        this.onLine = onLine;
+        this.onConnectionChange = onConnectionChange;
+        this.onDisconnect = onDisconnect;
+        this.onError = onError;
+        this.socket = null;
+        this.connected = false;
+        this.disconnecting = false;
+        this.writeQueue = Promise.resolve();
+      }
+
+      connect() {
+        if (!("WebSocket" in window)) {
+          return Promise.reject(
+            new Error("WebSocket is not supported by this browser.")
+          );
+        }
+
+        if (this.connected) {
+          return Promise.resolve();
+        }
+
+        return new Promise((resolve, reject) => {
+          const socket = new WebSocket(this.url);
+          let settled = false;
+
+          this.socket = socket;
+          this.disconnecting = false;
+
+          socket.addEventListener("open", () => {
+            this.connected = true;
+            settled = true;
+            this.onConnectionChange?.(true);
+            resolve();
+          }, { once: true });
+
+          socket.addEventListener("message", event => {
+            if (typeof event.data !== "string") {
+              return;
+            }
+
+            event.data
+              .split(/\n/)
+              .map(line => line.replace(/\r$/, "").trim())
+              .filter(Boolean)
+              .forEach(line => this.onLine?.(line));
+          });
+
+          socket.addEventListener("error", event => {
+            this.onError?.(event);
+
+            if (!settled) {
+              settled = true;
+              reject(new Error("Could not connect by Wi-Fi."));
+            }
+          });
+
+          socket.addEventListener("close", () => {
+            const wasUnexpected = !this.disconnecting;
+
+            this.connected = false;
+            this.cleanup();
+            this.onConnectionChange?.(false);
+
+            if (wasUnexpected) {
+              this.onDisconnect?.();
+            }
+          });
+        });
+      }
+
+      disconnect() {
+        this.disconnecting = true;
+        this.connected = false;
+
+        if (this.socket) {
+          try {
+            this.socket.close();
+          } catch {
+            // Socket may already be closed.
+          }
+        }
+
+        this.cleanup();
+        this.onConnectionChange?.(false);
+        return Promise.resolve();
+      }
+
+      isConnected() {
+        return Boolean(
+          this.connected &&
+          this.socket?.readyState === WebSocket.OPEN
+        );
+      }
+
+      async send(command) {
+        const text = String(command ?? "").replace(/[\r\n]+$/g, "");
+
+        if (!text) {
+          return false;
+        }
+
+        const queuedWrite = this.writeQueue.then(() =>
+          this.writeCommand(text)
+        );
+        this.writeQueue = queuedWrite.catch(() => false);
+
+        return queuedWrite;
+      }
+
+      async writeCommand(command) {
+        if (!this.isConnected()) {
+          throw new Error("Transport is not connected.");
+        }
+
+        this.socket.send(command);
+        return true;
+      }
+
+      cleanup() {
+        this.socket = null;
+        this.writeQueue = Promise.resolve();
+      }
+    }
+
+    function getDefaultWifiUrl() {
+      const isHttpPage =
+        location.protocol === "http:" || location.protocol === "https:";
+
+      if (!isHttpPage || !location.host) {
+        return DEFAULT_PIXEL_BOARD_WS_URL;
+      }
+
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const hostname = location.hostname || "192.168.4.1";
+
+      return `${protocol}//${hostname}:81/ws`;
+    }
+
+    function scheduleWifiReconnect() {
+      window.clearTimeout(wifiReconnectTimerId);
+      wifiReconnectTimerId = null;
+
+      if (!allowWifiReconnect) {
+        return;
+      }
+
+      wifiReconnectTimerId = window.setTimeout(() => {
+        connectToPixelBoard("wifi", { automatic: true });
+      }, 3000);
+    }
+
     function updateConnectionUi(connected) {
-      elements.connectBtn.textContent =
-        connected ? "Pixel Board connected" : "Connect Pixel Board";
-      elements.connectBtn.disabled = connected;
+      const serialAvailable = "serial" in navigator;
+
+      elements.connectUsbBtn.hidden = !serialAvailable;
+      elements.connectUsbBtn.disabled = connected;
+      elements.connectWifiBtn.disabled = connected;
+      elements.disconnectBtn.disabled = !connected;
+      elements.connectUsbBtn.textContent =
+        connected && activeTransportName === "usb"
+          ? "Connected via USB"
+          : "Connect via USB";
+      elements.connectWifiBtn.textContent =
+        connected && activeTransportName === "wifi"
+          ? "Connected via Wi-Fi"
+          : "Connect via Wi-Fi";
       elements.connectionDot.classList.toggle("connected", connected);
       elements.getStatusBtn.disabled = !connected;
 
@@ -3104,45 +3277,85 @@ function updateContentAccent(hex) {
       syncUI();
     }
 
-    async function connectToPixelBoard() {
-      if (isPixelBoardConnected()) {
-        return;
-      }
-
-      const transport = new SerialTransport({
+    function createTransport(type) {
+      const callbacks = {
         onLine: processSerialLine,
         onConnectionChange: updateConnectionUi,
         onDisconnect: () => {
           activeTransport = null;
+          const wasWifi = activeTransportName === "wifi";
+
+          activeTransportName = "";
           setStatus("Pixel Board disconnected.");
+
+          if (wasWifi) {
+            scheduleWifiReconnect();
+          }
         },
         onError: error => {
           console.error("Transport error:", error);
           setStatus("Pixel Board connection was interrupted.");
         }
-      });
+      };
+
+      if (type === "wifi") {
+        return new WebSocketTransport({
+          ...callbacks,
+          url: getDefaultWifiUrl()
+        });
+      }
+
+      return new SerialTransport(callbacks);
+    }
+
+    async function connectToPixelBoard(type = "usb", options = {}) {
+      if (isPixelBoardConnected()) {
+        await disconnectFromPixelBoard({ quiet: true });
+      }
+
+      window.clearTimeout(wifiReconnectTimerId);
+      wifiReconnectTimerId = null;
+      allowWifiReconnect = type === "wifi" && options.automatic !== false;
+
+      const transport = createTransport(type);
 
       try {
         activeTransport = transport;
+        activeTransportName = type;
         await transport.connect();
-        setStatus("Connected to Pixel Board.");
+        setStatus(type === "wifi"
+          ? "Connected via Wi-Fi."
+          : "Connected via USB.");
         syncStatusFromBoard();
       } catch (error) {
         console.error(error);
         activeTransport = null;
+        activeTransportName = "";
         await transport.disconnect();
         updateConnectionUi(false);
         setStatus(error.message || "Could not connect to Pixel Board.");
+
+        if (type === "wifi" && options.automatic) {
+          activeTransportName = "wifi";
+          scheduleWifiReconnect();
+        }
       }
     }
 
-    async function disconnectFromPixelBoard() {
+    async function disconnectFromPixelBoard(options = {}) {
       const transport = activeTransport;
 
+      allowWifiReconnect = false;
+      window.clearTimeout(wifiReconnectTimerId);
+      wifiReconnectTimerId = null;
       activeTransport = null;
+      activeTransportName = "";
       await transport?.disconnect();
       updateConnectionUi(false);
-      setStatus("Pixel Board disconnected.");
+
+      if (!options.quiet) {
+        setStatus("Pixel Board disconnected.");
+      }
     }
 
     async function syncStatusFromBoard() {
@@ -3708,8 +3921,16 @@ function processSerialLine(line) {
         collapsed ? "Show controls" : "Hide controls";
     }
 
-    elements.connectBtn.addEventListener("click", () => {
-      connectToPixelBoard();
+    elements.connectUsbBtn.addEventListener("click", () => {
+      connectToPixelBoard("usb", { automatic: false });
+    });
+
+    elements.connectWifiBtn.addEventListener("click", () => {
+      connectToPixelBoard("wifi", { automatic: true });
+    });
+
+    elements.disconnectBtn.addEventListener("click", () => {
+      disconnectFromPixelBoard();
     });
 
     elements.getStatusBtn.addEventListener("click", () => {
@@ -4154,11 +4375,20 @@ elements.color.addEventListener("input", (event) => {
     loadApplicationState();
     setControlsCollapsed(false);
     resizeCanvasForPreview();
-    syncUI();
+    updateConnectionUi(false);
 
     resetAnimation();
 
     requestAnimationFrame(applicationLoop);
+
+    if (
+      location.protocol === "http:" &&
+      location.hostname &&
+      location.hostname !== "localhost" &&
+      location.hostname !== "127.0.0.1"
+    ) {
+      connectToPixelBoard("wifi", { automatic: true });
+    }
   </script>
 </body>
 </html>
