@@ -4,6 +4,7 @@
 void showDisplay();
 void printStatus();
 void resetAnimation();
+void renderAnimationFrame();
 
 // -------------------------
 // Display Configuration
@@ -874,7 +875,13 @@ enum AnimationDirection
 enum ContentMode
 {
     MODE_TEXT,
-    MODE_DRAWING
+    MODE_DRAWING,
+    MODE_PRESET
+};
+
+enum PresetId
+{
+    PRESET_SOLID
 };
 
 char message[MESSAGE_BUFFER_SIZE] = "HELLO WORLD!";
@@ -891,6 +898,7 @@ unsigned long blinkOffMs = 350;
 AnimationEffect animationEffect = EFFECT_SCROLL;
 AnimationDirection animationDirection = DIRECTION_LEFT;
 ContentMode contentMode = MODE_TEXT;
+PresetId activePreset = PRESET_SOLID;
 bool animationPaused = false;
 
 int textOffset = DISPLAY_WIDTH;
@@ -903,6 +911,7 @@ unsigned long lastAnimationTime = 0;
 unsigned long lastBlinkTime = 0;
 
 int brightness = 2;
+Color solidPresetColor = {255, 102, 0};
 
 Color activeDrawingFrame[LED_COUNT];
 Color stagingDrawingFrame[LED_COUNT];
@@ -941,7 +950,27 @@ const char *getDirectionName()
 
 const char *getContentModeName()
 {
-    return contentMode == MODE_DRAWING ? "DRAWING" : "TEXT";
+    if (contentMode == MODE_DRAWING)
+    {
+        return "DRAWING";
+    }
+
+    if (contentMode == MODE_PRESET)
+    {
+        return "PRESET";
+    }
+
+    return "TEXT";
+}
+
+const char *getPresetName()
+{
+    switch (activePreset)
+    {
+        case PRESET_SOLID:
+        default:
+            return "SOLID";
+    }
 }
 
 unsigned long getAnimationInterval()
@@ -1007,22 +1036,22 @@ void drawDrawingFrame(int startX, int startY)
 
 int getContentWidth()
 {
-    return contentMode == MODE_DRAWING ? DISPLAY_WIDTH : textWidth;
+    return contentMode == MODE_TEXT ? textWidth : DISPLAY_WIDTH;
 }
 
 int getContentHeight()
 {
-    return contentMode == MODE_DRAWING ? DISPLAY_HEIGHT : FONT_HEIGHT;
+    return contentMode == MODE_TEXT ? FONT_HEIGHT : DISPLAY_HEIGHT;
 }
 
 int getCenteredContentX()
 {
-    return contentMode == MODE_DRAWING ? 0 : getCenteredTextX();
+    return contentMode == MODE_TEXT ? getCenteredTextX() : 0;
 }
 
 int getCenteredContentY()
 {
-    return contentMode == MODE_DRAWING ? 0 : TEXT_Y;
+    return contentMode == MODE_TEXT ? TEXT_Y : 0;
 }
 
 void drawActiveContent(int startX, int startY)
@@ -1031,10 +1060,103 @@ void drawActiveContent(int startX, int startY)
     {
         drawDrawingFrame(startX, startY);
     }
+    else if (contentMode == MODE_PRESET)
+    {
+        if (activePreset == PRESET_SOLID)
+        {
+            for (int y = 0; y < DISPLAY_HEIGHT; y++)
+            {
+                for (int x = 0; x < DISPLAY_WIDTH; x++)
+                {
+                    setPixel(startX + x, startY + y, solidPresetColor);
+                }
+            }
+        }
+    }
     else
     {
         drawText(message, startX, startY, messageColor);
     }
+}
+
+void renderSolidColorPreset()
+{
+    clearDisplay();
+
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        {
+            setPixel(x, y, solidPresetColor);
+        }
+    }
+
+    showDisplay();
+}
+
+void renderActivePreset()
+{
+    switch (activePreset)
+    {
+        case PRESET_SOLID:
+        default:
+            renderSolidColorPreset();
+            break;
+    }
+}
+
+bool setActivePreset(const char value[])
+{
+    if (strcmp(value, "SOLID") == 0)
+    {
+        activePreset = PRESET_SOLID;
+        Serial.println("PRESET:SOLID");
+
+        if (contentMode == MODE_PRESET)
+        {
+            resetAnimation();
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+bool setPresetParameter(const char command[])
+{
+    if (strncmp(command, "COLOR:", 6) != 0)
+    {
+        return false;
+    }
+
+    int red;
+    int green;
+    int blue;
+
+    if (sscanf(command + 6, "%d,%d,%d", &red, &green, &blue) != 3)
+    {
+        Serial.println("PRESET_PARAM:ERROR:COLOR");
+        return true;
+    }
+
+    if (red < 0 || red > 255 ||
+        green < 0 || green > 255 ||
+        blue < 0 || blue > 255)
+    {
+        Serial.println("PRESET_PARAM:ERROR:COLOR");
+        return true;
+    }
+
+    solidPresetColor = {red, green, blue};
+    Serial.println("PRESET_PARAM:COLOR:OK");
+
+    if (contentMode == MODE_PRESET && activePreset == PRESET_SOLID)
+    {
+        renderAnimationFrame();
+    }
+
+    return true;
 }
 
 bool isHexCharacter(char character)
@@ -1186,6 +1308,14 @@ bool setContentMode(const char value[])
         return true;
     }
 
+    if (strcmp(value, "PRESET") == 0)
+    {
+        contentMode = MODE_PRESET;
+        resetAnimation();
+        Serial.println("MODE:PRESET");
+        return true;
+    }
+
     return false;
 }
 
@@ -1331,6 +1461,16 @@ void printStatus()
     Serial.print(";MODE=");
     Serial.print(getContentModeName());
 
+    Serial.print(";PRESET=");
+    Serial.print(getPresetName());
+
+    Serial.print(";PRESET_COLOR=");
+    Serial.print(solidPresetColor.red);
+    Serial.print(",");
+    Serial.print(solidPresetColor.green);
+    Serial.print(",");
+    Serial.print(solidPresetColor.blue);
+
     Serial.print(";SPEED=");
     Serial.print(animationSpeed);
 
@@ -1358,7 +1498,9 @@ void printHelp()
 {
     Serial.println("Available commands:");
     Serial.println("MESSAGE:<text>");
-    Serial.println("MODE:TEXT|DRAWING");
+    Serial.println("MODE:TEXT|DRAWING|PRESET");
+    Serial.println("PRESET:SOLID");
+    Serial.println("PRESET_PARAM:COLOR:<red>,<green>,<blue>");
     Serial.println("EFFECT:STILL|SCROLL|WIPE|BLINK");
     Serial.println("DIRECTION:LEFT|RIGHT|UP|DOWN");
     Serial.println("SPEED:<pixels per second, 1-30>");
@@ -1575,7 +1717,21 @@ void processCommand(const char command[])
     {
         if (!setContentMode(command + 5))
         {
-            Serial.println("Use MODE:TEXT|DRAWING");
+            Serial.println("Use MODE:TEXT|DRAWING|PRESET");
+        }
+    }
+    else if (strncmp(command, "PRESET_PARAM:", 13) == 0)
+    {
+        if (!setPresetParameter(command + 13))
+        {
+            Serial.println("Use PRESET_PARAM:COLOR:red,green,blue");
+        }
+    }
+    else if (strncmp(command, "PRESET:", 7) == 0)
+    {
+        if (!setActivePreset(command + 7))
+        {
+            Serial.println("Use PRESET:SOLID");
         }
     }
     else if (strncmp(command, "FRAME_BEGIN:", 12) == 0)

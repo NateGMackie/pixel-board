@@ -413,6 +413,48 @@
       gap: 8px;
     }
 
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .preset-card {
+      min-height: 78px;
+      padding: 10px;
+      text-align: left;
+      border-radius: 8px;
+    }
+
+    .preset-card strong,
+    .preset-card span {
+      display: block;
+    }
+
+    .preset-card strong {
+      font-size: 13px;
+      line-height: 18px;
+    }
+
+    .preset-card span {
+      margin-top: 3px;
+      font-size: 11px;
+      line-height: 15px;
+      color: var(--text-tertiary);
+      font-weight: 500;
+    }
+
+    .preset-card.selected {
+      border-color: var(--content-accent-border);
+      background: var(--content-accent-soft);
+    }
+
+    .preset-card:disabled {
+      opacity: .46;
+      cursor: not-allowed;
+    }
+
     .tag.on {
       border-color: var(--content-accent-border);
       background: var(--content-accent-soft);
@@ -515,7 +557,8 @@
       }
 
       .two,
-      .three { grid-template-columns: 1fr; }
+      .three,
+      .preset-grid { grid-template-columns: 1fr; }
 
       #displayCard,
       #controlsCard { padding: 12px; }
@@ -588,9 +631,10 @@
                   <select id="contentType">
                     <option value="text">Text</option>
                     <option value="drawing">Drawing</option>
+                    <option value="preset">Presets</option>
                   </select>
                 </div>
-                <div>
+                <div id="contentColorField">
                   <label for="color">Color</label>
                   <input id="color" type="color" value="#00ff8c" />
                 </div>
@@ -615,6 +659,18 @@
                   <button id="loadFramePanel" type="button">Load frame</button>
                 </div>
                 <div class="help" id="drawingPanelHint">Pause playback to edit the drawing.</div>
+              </div>
+
+              <div class="field" id="presetControls" hidden>
+                <label>Presets</label>
+                <div class="preset-grid" id="presetGrid"></div>
+                <div class="field" id="solidPresetSettings">
+                  <label for="solidPresetColor">Solid color</label>
+                  <input id="solidPresetColor" type="color" value="#ff6600" />
+                </div>
+                <div class="btnrow" style="margin-top:10px">
+                  <button id="publishPresetBtn" type="button">Display on Pixel Board</button>
+                </div>
               </div>
             </div>
 
@@ -791,6 +847,45 @@
 
     const glyphFor = (character) =>
       FONT_5X7[character] ?? FONT_5X7["?"];
+
+    const PRESET_REGISTRY = {
+      solid: {
+        id: "solid",
+        firmwareId: "SOLID",
+        name: "Solid Color",
+        description: "Fill the Pixel Board with one color.",
+        available: true,
+        defaultSettings: {
+          color: "#ff6600"
+        }
+      },
+      clock: {
+        id: "clock",
+        firmwareId: "CLOCK",
+        name: "Digital Clock",
+        description: "Show the current time.",
+        available: false,
+        defaultSettings: {}
+      },
+      rain: {
+        id: "rain",
+        firmwareId: "RAIN",
+        name: "Digital Rain",
+        description: "Animated cascading pixels.",
+        available: false,
+        defaultSettings: {}
+      },
+      fire: {
+        id: "fire",
+        firmwareId: "FIRE",
+        name: "Fire",
+        description: "Animated flame simulation.",
+        available: false,
+        defaultSettings: {}
+      }
+    };
+
+    const PRESET_LIST = Object.values(PRESET_REGISTRY);
 
     function normalizePixelColor(value, fallbackColor = state.color) {
       if (value === PIXEL_OFF || value === null || value === undefined) {
@@ -1012,6 +1107,29 @@
       }
     }
 
+    function buildPresetBitmap() {
+      const pixels = createPixelGrid(display.width, display.height);
+
+      if (state.selectedPresetId === "solid") {
+        const color = normalizePixelColor(
+          state.presetSettings.solid.color,
+          PRESET_REGISTRY.solid.defaultSettings.color
+        );
+
+        for (let y = 0; y < display.height; y += 1) {
+          for (let x = 0; x < display.width; x += 1) {
+            pixels[y][x] = color;
+          }
+        }
+      }
+
+      return {
+        pixels,
+        rows: display.height,
+        columns: display.width
+      };
+    }
+
     function getContentBitmap() {
       if (state.contentType === "drawing") {
         return {
@@ -1019,6 +1137,10 @@
           rows: drawing.height,
           columns: drawing.width
         };
+      }
+
+      if (state.contentType === "preset") {
+        return buildPresetBitmap();
       }
 
       return buildTextBitmap(state.text);
@@ -1254,10 +1376,16 @@ function updateContentAccent(hex) {
       controlsWrap: document.getElementById("controlsWrap"),
       msg: document.getElementById("msg"),
       contentType: document.getElementById("contentType"),
+      contentColorField: document.getElementById("contentColorField"),
       effect: document.getElementById("effect"),
       textControls: document.getElementById("textControls"),
       drawingControls: document.getElementById("drawingControls"),
       drawingPanelHint: document.getElementById("drawingPanelHint"),
+      presetControls: document.getElementById("presetControls"),
+      presetGrid: document.getElementById("presetGrid"),
+      solidPresetSettings: document.getElementById("solidPresetSettings"),
+      solidPresetColor: document.getElementById("solidPresetColor"),
+      publishPresetBtn: document.getElementById("publishPresetBtn"),
       directionField: document.getElementById("directionField"),
       speedField: document.getElementById("speedField"),
       dir: document.getElementById("dir"),
@@ -1300,7 +1428,13 @@ function updateContentAccent(hex) {
       blinkOffMs: 350,
       doodleOn: true,
       previewDotSize: 10,
-      previewGap: 2
+      previewGap: 2,
+      selectedPresetId: "solid",
+      presetSettings: {
+        solid: {
+          color: "#ff6600"
+        }
+      }
     };
 
     let display = createDisplay(64, 16);
@@ -1332,6 +1466,10 @@ function updateContentAccent(hex) {
     let textEditing = true;
     let drawingEditing = true;
     let drawingSyncedToBoard = false;
+    let presetDirty = false;
+    let presetEditing = true;
+    let presetSyncedToBoard = false;
+    let publishedPresetId = null;
 
     function rgbToHex(red, green, blue) {
   return "#" +
@@ -1358,13 +1496,19 @@ function updateContentAccent(hex) {
     }
 
     function getActiveColor() {
+      if (state.contentType === "preset") {
+        return state.presetSettings.solid.color;
+      }
+
       return state.contentType === "drawing"
         ? state.drawingColor
         : state.textColor;
     }
 
     function setActiveColor(color) {
-      if (state.contentType === "drawing") {
+      if (state.contentType === "preset") {
+        state.presetSettings.solid.color = color;
+      } else if (state.contentType === "drawing") {
         state.drawingColor = color;
       } else {
         state.textColor = color;
@@ -1379,15 +1523,27 @@ function updateContentAccent(hex) {
     }
 
     function isCurrentDraftDirty() {
-      return state.contentType === "drawing"
-        ? drawingDirty || drawingDisplayDirty
-        : textDirty;
+      if (state.contentType === "drawing") {
+        return drawingDirty || drawingDisplayDirty;
+      }
+
+      if (state.contentType === "preset") {
+        return presetDirty;
+      }
+
+      return textDirty;
     }
 
     function isCurrentEditing() {
-      return state.contentType === "drawing"
-        ? drawingEditing
-        : textEditing;
+      if (state.contentType === "drawing") {
+        return drawingEditing;
+      }
+
+      if (state.contentType === "preset") {
+        return presetEditing;
+      }
+
+      return textEditing;
     }
 
     function isCurrentLive() {
@@ -1399,16 +1555,50 @@ function updateContentAccent(hex) {
         return false;
       }
 
+      if (
+        state.contentType === "preset" &&
+        (
+          !presetSyncedToBoard ||
+          publishedPresetId !== state.selectedPresetId
+        )
+      ) {
+        return false;
+      }
+
       return !isCurrentEditing() && !isCurrentDraftDirty();
     }
 
+    function getSelectedPreset() {
+      return PRESET_REGISTRY[state.selectedPresetId] ??
+        PRESET_REGISTRY.solid;
+    }
+
+    function getContentLabel(contentType = state.contentType) {
+      if (contentType === "drawing") {
+        return "Drawing";
+      }
+
+      if (contentType === "preset") {
+        const preset = contentType === state.contentType
+          ? getSelectedPreset()
+          : PRESET_REGISTRY[publishedPresetId] ?? PRESET_REGISTRY.solid;
+
+        return preset.name;
+      }
+
+      return "Text";
+    }
+
     function getWorkflowStatus() {
-      const editor =
-        state.contentType === "drawing" ? "Drawing" : "Text";
+      const editor = getContentLabel();
       const board =
         displayedContentType === "drawing"
           ? "Drawing"
-          : (displayedContentType === "text" ? "Text" : "Unknown");
+          : (
+              displayedContentType === "preset"
+                ? getContentLabel("preset")
+                : (displayedContentType === "text" ? "Text" : "Unknown")
+            );
 
       if (isCurrentLive()) {
         return `Live ${editor} · Pixel Board up to date`;
@@ -1437,6 +1627,13 @@ function updateContentAccent(hex) {
 
       drawingDisplayDirty = true;
       drawingEditing = true;
+      syncUI();
+    }
+
+    function markPresetDirty() {
+      presetDirty = true;
+      presetSyncedToBoard = false;
+      presetEditing = true;
       syncUI();
     }
 
@@ -1476,7 +1673,11 @@ function updateContentAccent(hex) {
           drawingDisplayDirty,
           textEditing,
           drawingEditing,
-          drawingSyncedToBoard
+          drawingSyncedToBoard,
+          presetDirty,
+          presetEditing,
+          presetSyncedToBoard,
+          publishedPresetId
         },
         display: {
           width: display.width,
@@ -1531,6 +1732,18 @@ function updateContentAccent(hex) {
           normalizeStateColor(state.textColor || state.color);
         state.drawingColor =
           normalizeStateColor(state.drawingColor || state.color);
+        state.selectedPresetId =
+          PRESET_REGISTRY[state.selectedPresetId]
+            ? state.selectedPresetId
+            : "solid";
+        state.presetSettings = {
+          solid: {
+            ...PRESET_REGISTRY.solid.defaultSettings,
+            ...(state.presetSettings?.solid ?? {})
+          }
+        };
+        state.presetSettings.solid.color =
+          normalizeStateColor(state.presetSettings.solid.color, "#FF6600");
         state.color = getActiveColor();
 
         if (saved.publication) {
@@ -1544,6 +1757,12 @@ function updateContentAccent(hex) {
           drawingEditing = saved.publication.drawingEditing !== false;
           drawingSyncedToBoard =
             Boolean(saved.publication.drawingSyncedToBoard);
+          presetDirty = Boolean(saved.publication.presetDirty);
+          presetEditing = saved.publication.presetEditing !== false;
+          presetSyncedToBoard =
+            Boolean(saved.publication.presetSyncedToBoard);
+          publishedPresetId =
+            saved.publication.publishedPresetId || publishedPresetId;
         }
 
         const width = clamp(Number(saved.display?.width ?? 64), 8, 256);
@@ -1574,8 +1793,7 @@ function updateContentAccent(hex) {
     }
 
     function updateBezel() {
-      const contentLabel =
-        state.contentType === "drawing" ? "DRAWING" : "TEXT";
+      const contentLabel = getContentLabel().toUpperCase();
 
       if (state.effect === "still") {
         elements.bezelLabel.textContent = `${contentLabel} · STILL`;
@@ -1585,6 +1803,43 @@ function updateContentAccent(hex) {
         elements.bezelLabel.textContent =
           `${contentLabel} · ${state.effect.toUpperCase()} ${state.direction.toUpperCase()}`;
       }
+    }
+
+    function renderPresetSelection() {
+      elements.presetGrid.innerHTML = "";
+
+      PRESET_LIST.forEach((preset) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "preset-card";
+        button.dataset.presetId = preset.id;
+        button.disabled = !preset.available || isCurrentLive();
+        button.classList.toggle(
+          "selected",
+          preset.id === state.selectedPresetId
+        );
+        button.innerHTML = `
+          <strong>${preset.name}</strong>
+          <span>${preset.available ? preset.description : `${preset.description} Coming soon.`}</span>
+        `;
+
+        button.addEventListener("click", () => {
+          if (!preset.available || isCurrentLive()) {
+            return;
+          }
+
+          state.selectedPresetId = preset.id;
+          state.presetSettings[preset.id] = {
+            ...preset.defaultSettings,
+            ...(state.presetSettings[preset.id] ?? {})
+          };
+          markPresetDirty();
+          resetAnimation();
+          saveApplicationState();
+        });
+
+        elements.presetGrid.appendChild(button);
+      });
     }
 
     function syncUI() {
@@ -1618,9 +1873,12 @@ function updateContentAccent(hex) {
       );
 
       const isDrawing = state.contentType === "drawing";
+      const isPreset = state.contentType === "preset";
+      const selectedPreset = getSelectedPreset();
       const isLive = isCurrentLive();
       const isEditing = !isLive;
       const canEditDrawing = isDrawing && isEditing;
+      const canEditPreset = isPreset && isEditing && selectedPreset.available;
       const usesDirection =
         isLive &&
         (state.effect === "scroll" || state.effect === "wipe");
@@ -1632,11 +1890,17 @@ function updateContentAccent(hex) {
         isDrawing ? "Clear drawing" : "Clear message";
 
       // Content-specific controls
-      elements.textControls.hidden = isDrawing;
+      elements.textControls.hidden = state.contentType !== "text";
       elements.drawingControls.hidden = !isDrawing;
-      elements.msg.disabled = isDrawing || !isEditing;
-      elements.color.disabled = !isEditing;
-      elements.clearBtn.disabled = !isEditing;
+      elements.presetControls.hidden = !isPreset;
+      elements.contentColorField.hidden = isPreset;
+      elements.msg.disabled = state.contentType !== "text" || !isEditing;
+      elements.color.disabled = isPreset || !isEditing;
+      elements.solidPresetSettings.hidden =
+        !isPreset || state.selectedPresetId !== "solid";
+      elements.solidPresetColor.value = state.presetSettings.solid.color;
+      elements.solidPresetColor.disabled = !canEditPreset;
+      elements.clearBtn.disabled = isPreset || !isEditing;
       elements.brushLightPanel.disabled = !canEditDrawing;
       elements.brushErasePanel.disabled = !canEditDrawing;
       elements.copyFramePanel.disabled = isDrawing && !isEditing;
@@ -1664,6 +1928,22 @@ function updateContentAccent(hex) {
             );
       elements.publishTextBtn.disabled =
         !isDrawing && !serialPort?.writable && !isLive;
+
+      elements.publishPresetBtn.textContent =
+        isLive
+          ? "Edit Preset"
+          : (
+              displayedContentType === "preset" &&
+              publishedPresetId === state.selectedPresetId
+                ? "Update Pixel Board"
+                : "Display on Pixel Board"
+            );
+      elements.publishPresetBtn.disabled =
+        isPreset &&
+        (
+          (!selectedPreset.available && !isLive) ||
+          (!serialPort?.writable && !isLive)
+        );
 
       elements.sendFramePanel.disabled =
         isLive
@@ -1693,6 +1973,7 @@ function updateContentAccent(hex) {
         : "Live drawing controls are synced with the Pixel Board.";
 
       elements.drawingPanelHint.textContent = drawingHintText;
+      renderPresetSelection();
 
       elements.brushLightPanel.classList.toggle("on", state.doodleOn);
       elements.brushErasePanel.classList.toggle("off", !state.doodleOn);
@@ -1982,7 +2263,7 @@ function updateContentAccent(hex) {
 
       const value =
         state.doodleOn
-          ? normalizePixelColor(state.color)
+          ? normalizePixelColor(state.drawingColor)
           : PIXEL_OFF;
 
       if (previousDoodleCell) {
@@ -2125,6 +2406,7 @@ async function sendDrawingFrameToBoard() {
       drawingDirty = true;
       drawingEditing = true;
       syncUI();
+      setStatus("Could not publish drawing.");
       return;
     }
   }
@@ -2177,6 +2459,7 @@ async function publishTextToBoard() {
       textDirty = true;
       textEditing = true;
       syncUI();
+      setStatus("Could not publish text.");
       return;
     }
   }
@@ -2187,6 +2470,75 @@ async function publishTextToBoard() {
   syncUI();
   saveApplicationState();
   setStatus("Text sent to Pixel Board.");
+}
+
+async function publishPresetToBoard() {
+  if (isCurrentLive()) {
+    presetEditing = true;
+    resetAnimation();
+    syncUI();
+    saveApplicationState();
+    return;
+  }
+
+  const preset = getSelectedPreset();
+
+  if (!preset.available) {
+    setStatus("That preset is coming soon.");
+    syncUI();
+    return;
+  }
+
+  if (!serialPort?.writable) {
+    setStatus("Pixel Board is not connected.");
+    syncUI();
+    return;
+  }
+
+  if (preset.id !== "solid") {
+    setStatus("That preset is coming soon.");
+    syncUI();
+    return;
+  }
+
+  const color = hexToRgb(state.presetSettings.solid.color);
+  const commands = [
+    `PRESET_PARAM:COLOR:${color.red},${color.green},${color.blue}`,
+    `PRESET:${preset.firmwareId}`,
+    `EFFECT:${state.effect}`,
+    `DIRECTION:${state.direction}`,
+    `SPEED:${state.speed}`,
+    `BLINK_ON:${state.blinkOnMs}`,
+    `BLINK_OFF:${state.blinkOffMs}`,
+    `PAUSED:${state.paused ? 1 : 0}`,
+    "MODE:PRESET"
+  ];
+
+  elements.publishPresetBtn.textContent = "Sending...";
+  elements.publishPresetBtn.disabled = true;
+
+  for (const command of commands) {
+    const sent = await sendSerialCommand(command);
+
+    if (!sent) {
+      presetDirty = true;
+      presetEditing = true;
+      presetSyncedToBoard = false;
+      syncUI();
+      setStatus("Could not publish preset.");
+      return;
+    }
+  }
+
+  presetDirty = false;
+  presetEditing = false;
+  presetSyncedToBoard = true;
+  displayedContentType = "preset";
+  publishedPresetId = preset.id;
+  resetAnimation();
+  syncUI();
+  saveApplicationState();
+  setStatus(`${preset.name} sent to Pixel Board.`);
 }
 
 async function readSerial() {
@@ -2277,14 +2629,19 @@ function processSerialLine(line) {
     values[key] = value;
   }
 
+  const rawMode = values.MODE?.toLowerCase();
   const statusMode =
-    values.MODE?.toLowerCase() === "drawing" ? "drawing" : "text";
+    rawMode === "drawing" || rawMode === "preset" ? rawMode : "text";
   const preserveCurrentEditor = isCurrentEditing() && isCurrentDraftDirty();
 
   displayedContentType = statusMode;
 
   if (statusMode === "text" && !preserveCurrentEditor) {
     state.contentType = "text";
+  }
+
+  if (statusMode === "preset" && !preserveCurrentEditor) {
+    state.contentType = "preset";
   }
 
   if (values.SPEED !== undefined) {
@@ -2337,6 +2694,39 @@ function processSerialLine(line) {
   if (statusMode === "drawing") {
     drawingSyncedToBoard = false;
     drawingEditing = true;
+  }
+
+  if (statusMode === "preset") {
+    const presetId =
+      values.PRESET?.toLowerCase() === "solid" ? "solid" : null;
+
+    if (presetId) {
+      publishedPresetId = presetId;
+
+      if (!presetDirty) {
+        state.selectedPresetId = presetId;
+      }
+
+      if (values.PRESET_COLOR !== undefined && !presetDirty) {
+        const [red, green, blue] =
+          values.PRESET_COLOR.split(",").map(Number);
+
+        if (
+          Number.isFinite(red) &&
+          Number.isFinite(green) &&
+          Number.isFinite(blue)
+        ) {
+          state.presetSettings.solid.color =
+            rgbToHex(red, green, blue);
+        }
+      }
+
+      presetSyncedToBoard = !presetDirty;
+      presetEditing = presetDirty;
+    } else {
+      presetSyncedToBoard = false;
+      presetEditing = true;
+    }
   }
 
   if (values.BRIGHTNESS !== undefined) {
@@ -2525,6 +2915,14 @@ function processSerialLine(line) {
       saveApplicationState();
     });
 
+    elements.solidPresetColor.addEventListener("input", (event) => {
+      state.presetSettings.solid.color =
+        normalizeStateColor(event.target.value, "#FF6600");
+      resetAnimation();
+      markPresetDirty();
+      saveApplicationState();
+    });
+
     elements.effect.addEventListener("change", (event) => {
       state.effect = event.target.value;
       syncUI();
@@ -2679,6 +3077,7 @@ elements.bright.addEventListener("input", (event) => {
     }
 
     elements.publishTextBtn.addEventListener("click", publishTextToBoard);
+    elements.publishPresetBtn.addEventListener("click", publishPresetToBoard);
     elements.copyFramePanel.addEventListener("click", copyCurrentFrame);
     elements.loadFramePanel.addEventListener("click", loadFrameFromPrompt);
     elements.sendFramePanel.addEventListener("click", sendDrawingFrameToBoard);
